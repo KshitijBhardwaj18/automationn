@@ -256,59 +256,12 @@ def resolve_vpc_config(
         base_tags=global_tags,
     )
 
-    # Private subnets: start after public subnets
-    # With /24 public subnets, we used 3 * 256 = 768 IPs
-    # For /20 private subnets (4096 IPs each), we need to align properly
-    # Offset = ceil(3 * 256 / 4096) = 1 block of /20 size
-    # But simpler: use fixed offsets that work for /16 VPC
+    # Private subnets: use custom if provided, otherwise auto-calculate
+    # For a /16 VPC, put private subnets in the 10.0.16.0+ range
     # Public at 10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24
     # Private at 10.0.16.0/20, 10.0.32.0/20, 10.0.48.0/20
-    private_subnets = resolve_subnets(
-        custom_subnets=vpc_input.private_subnets,
-        vpc_cidr=vpc_cidr,
-        availability_zones=availability_zones,
-        subnet_type="private",
-        cidr_mask=20,
-        offset_blocks=0,  # Will be calculated from different base
-        customer_id=customer_id,
-        base_tags=global_tags,
-    )
-
-    # Recalculate private subnets with proper offset
-    # For a /16 VPC, put private subnets in the 10.0.16.0+ range
-    vpc_network = ipaddress.ip_network(vpc_cidr, strict=False)
-    private_base = int(vpc_network.network_address) + (16 * 256)  # Skip first 16 /24 blocks
-
-    private_subnets = []
-    for i, az in enumerate(availability_zones):
-        subnet_size = 2 ** (32 - 20)  # /20 = 4096 IPs
-        subnet_addr = ipaddress.ip_address(private_base + (i * subnet_size))
-        subnet_cidr = f"{subnet_addr}/20"
-
-        name = f"{customer_id}-private-{az[-1]}"
-        if vpc_input.private_subnets:
-            # Find matching custom subnet
-            for custom in vpc_input.private_subnets:
-                if custom.availability_zone == az:
-                    subnet_cidr = custom.cidr_block
-                    name = custom.name or name
-                    break
-
-        private_subnets.append(
-            SubnetResolved(
-                cidr_block=subnet_cidr,
-                availability_zone=az,
-                name=name,
-                tags={
-                    "SubnetType": "private",
-                    "kubernetes.io/role/internal-elb": "1",
-                    **global_tags,
-                },
-            )
-        )
-
-    # Override with custom subnets if provided
     if vpc_input.private_subnets:
+        # Use custom subnets as provided
         private_subnets = [
             SubnetResolved(
                 cidr_block=s.cidr_block,
@@ -323,6 +276,29 @@ def resolve_vpc_config(
             )
             for s in vpc_input.private_subnets
         ]
+    else:
+        # Auto-calculate private subnets with proper offset
+        vpc_network = ipaddress.ip_network(vpc_cidr, strict=False)
+        private_base = int(vpc_network.network_address) + (16 * 256)  # Skip first 16 /24 blocks
+
+        private_subnets = []
+        for i, az in enumerate(availability_zones):
+            subnet_size = 2 ** (32 - 20)  # /20 = 4096 IPs
+            subnet_addr = ipaddress.ip_address(private_base + (i * subnet_size))
+            subnet_cidr = f"{subnet_addr}/20"
+
+            private_subnets.append(
+                SubnetResolved(
+                    cidr_block=subnet_cidr,
+                    availability_zone=az,
+                    name=f"{customer_id}-private-{az[-1]}",
+                    tags={
+                        "SubnetType": "private",
+                        "kubernetes.io/role/internal-elb": "1",
+                        **global_tags,
+                    },
+                )
+            )
 
     # Pod subnets: only if secondary CIDR is provided
     pod_subnets: list[SubnetResolved] = []

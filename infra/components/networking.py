@@ -1,8 +1,12 @@
-"""VPC and networking infrastructure for BYOC platform."""
+"""VPC and networking infrastructure for BYOC platform.
+
+This module creates VPC infrastructure with subnets configured from the resolved
+customer configuration. Subnets are created manually (not auto-calculated) to ensure
+exact CIDRs, names, and tags from the config are used.
+"""
 
 import pulumi
 import pulumi_aws as aws
-import pulumi_awsx as awsx
 
 from api.models import (
     NatGatewayStrategy,
@@ -12,18 +16,19 @@ from api.models import (
 )
 
 
-def _get_nat_strategy(strategy: NatGatewayStrategy) -> awsx.ec2.NatGatewayStrategy:
-    """Convert NatGatewayStrategy enum to awsx enum."""
-    mapping = {
-        NatGatewayStrategy.NONE: awsx.ec2.NatGatewayStrategy.NONE,
-        NatGatewayStrategy.SINGLE: awsx.ec2.NatGatewayStrategy.SINGLE,
-        NatGatewayStrategy.ONE_PER_AZ: awsx.ec2.NatGatewayStrategy.ONE_PER_AZ,
-    }
-    return mapping[strategy]
-
-
 class Networking(pulumi.ComponentResource):
-    """VPC and networking infrastructure for a customer."""
+    """VPC and networking infrastructure for a customer.
+
+    Creates:
+    - VPC with specified CIDR
+    - Internet Gateway
+    - Public subnets (from resolved config)
+    - Private subnets (from resolved config)
+    - Pod subnets (if configured, from resolved config)
+    - NAT Gateway(s) based on strategy
+    - Route tables with appropriate routes
+    - VPC Endpoints (gateway and interface types)
+    """
 
     def __init__(
         self,
@@ -36,63 +41,34 @@ class Networking(pulumi.ComponentResource):
     ):
         super().__init__("byoc:infrastructure:Networking", name, None, opts)
 
-        child_opts = pulumi.ResourceOptions(parent=self, provider=provider)
         self._tags = tags or {}
         self._name = name
         self._availability_zones = availability_zones
         self._provider = provider
         self._vpc_cidr = vpc_config.cidr_block
+        # Store subnet configs for AZ lookup (resource properties are Outputs)
+        self._public_subnet_configs = vpc_config.public_subnets
+        self._private_subnet_configs = vpc_config.private_subnets
 
-        # Get CIDR masks from resolved subnets
-        public_cidr_mask = self._get_cidr_mask(vpc_config.public_subnets[0].cidr_block)
-        private_cidr_mask = self._get_cidr_mask(vpc_config.private_subnets[0].cidr_block)
+        child_opts = pulumi.ResourceOptions(parent=self, provider=provider)
 
-        # Build subnet specs for awsx VPC
-        subnet_specs = [
-            awsx.ec2.SubnetSpecArgs(
-                type=awsx.ec2.SubnetType.PUBLIC,
-                cidr_mask=public_cidr_mask,
-                tags={
-                    "kubernetes.io/role/elb": "1",
-                    "karpenter.sh/discovery": name,
-                    **self._tags,
-                },
-            ),
-            awsx.ec2.SubnetSpecArgs(
-                type=awsx.ec2.SubnetType.PRIVATE,
-                cidr_mask=private_cidr_mask,
-                tags={
-                    "kubernetes.io/role/internal-elb": "1",
-                    "karpenter.sh/discovery": name,
-                    **self._tags,
-                },
-            ),
-        ]
-
-        # Create VPC using awsx
-        self.vpc = awsx.ec2.Vpc(
+        # 1. Create VPC
+        self.vpc = aws.ec2.Vpc(
             f"{name}-vpc",
             cidr_block=vpc_config.cidr_block,
-            availability_zone_names=availability_zones,
-            nat_gateways=awsx.ec2.NatGatewayConfigurationArgs(
-                strategy=_get_nat_strategy(vpc_config.nat_gateway_strategy),
-            ),
-            subnet_specs=subnet_specs,
             enable_dns_hostnames=vpc_config.enable_dns_hostnames,
             enable_dns_support=vpc_config.enable_dns_support,
             tags={
                 "Name": f"{name}-vpc",
                 **self._tags,
+                **vpc_config.tags,
             },
             opts=child_opts,
         )
+        self.vpc_id = self.vpc.id
 
-        self.vpc_id = self.vpc.vpc_id
-        self.private_subnet_ids = self.vpc.private_subnet_ids
-        self.public_subnet_ids = self.vpc.public_subnet_ids
-
-        # Add secondary CIDR blocks if specified
-        self.secondary_cidr_associations = []
+        # 2. Add secondary CIDR blocks if specified
+        self.secondary_cidr_associations: list[aws.ec2.VpcIpv4CidrBlockAssociation] = []
         for i, secondary_cidr in enumerate(vpc_config.secondary_cidr_blocks):
             association = aws.ec2.VpcIpv4CidrBlockAssociation(
                 f"{name}-secondary-cidr-{i}",
@@ -102,92 +78,382 @@ class Networking(pulumi.ComponentResource):
             )
             self.secondary_cidr_associations.append(association)
 
-        # Create pod subnets if configured
-        self.pod_subnet_ids: list[pulumi.Output[str]] = []
+        # 3. Create Internet Gateway
+        self.igw = aws.ec2.InternetGateway(
+            f"{name}-igw",
+            vpc_id=self.vpc_id,
+            tags={
+                "Name": f"{name}-igw",
+                **self._tags,
+            },
+            opts=child_opts,
+        )
+
+        # 4. Create public subnets using resolved config
+        self.public_subnets: list[aws.ec2.Subnet] = []
+        for i, subnet_config in enumerate(vpc_config.public_subnets):
+            subnet = aws.ec2.Subnet(
+                f"{name}-public-subnet-{i}",
+                vpc_id=self.vpc_id,
+                cidr_block=subnet_config.cidr_block,
+                availability_zone=subnet_config.availability_zone,
+                map_public_ip_on_launch=True,
+                tags={
+                    "Name": subnet_config.name,
+                    "SubnetType": "public",
+                    "kubernetes.io/role/elb": "1",
+                    "karpenter.sh/discovery": name,
+                    **self._tags,
+                    **subnet_config.tags,
+                },
+                opts=child_opts,
+            )
+            self.public_subnets.append(subnet)
+
+        self.public_subnet_ids = pulumi.Output.all(
+            *[s.id for s in self.public_subnets]
+        ).apply(lambda ids: list(ids))
+
+        # 5. Create public route table with IGW route
+        self.public_route_table = aws.ec2.RouteTable(
+            f"{name}-public-rt",
+            vpc_id=self.vpc_id,
+            tags={
+                "Name": f"{name}-public-rt",
+                **self._tags,
+            },
+            opts=child_opts,
+        )
+
+        # Add route to Internet Gateway
+        aws.ec2.Route(
+            f"{name}-public-igw-route",
+            route_table_id=self.public_route_table.id,
+            destination_cidr_block="0.0.0.0/0",
+            gateway_id=self.igw.id,
+            opts=pulumi.ResourceOptions(
+                parent=self,
+                provider=provider,
+                depends_on=[self.public_route_table, self.igw],
+            ),
+        )
+
+        # Associate public subnets with public route table
+        for i, subnet in enumerate(self.public_subnets):
+            aws.ec2.RouteTableAssociation(
+                f"{name}-public-rta-{i}",
+                subnet_id=subnet.id,
+                route_table_id=self.public_route_table.id,
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=provider,
+                    depends_on=[subnet, self.public_route_table],
+                ),
+            )
+
+        # 6. Create NAT Gateway(s) based on strategy
+        self.nat_gateways: list[aws.ec2.NatGateway] = []
+        self.nat_eips: list[aws.ec2.Eip] = []
+        self._create_nat_gateways(vpc_config.nat_gateway_strategy, child_opts)
+
+        # 7. Create private subnets using resolved config
+        self.private_subnets: list[aws.ec2.Subnet] = []
+        for i, subnet_config in enumerate(vpc_config.private_subnets):
+            subnet = aws.ec2.Subnet(
+                f"{name}-private-subnet-{i}",
+                vpc_id=self.vpc_id,
+                cidr_block=subnet_config.cidr_block,
+                availability_zone=subnet_config.availability_zone,
+                map_public_ip_on_launch=False,
+                tags={
+                    "Name": subnet_config.name,
+                    "SubnetType": "private",
+                    "kubernetes.io/role/internal-elb": "1",
+                    "karpenter.sh/discovery": name,
+                    **self._tags,
+                    **subnet_config.tags,
+                },
+                opts=child_opts,
+            )
+            self.private_subnets.append(subnet)
+
+        self.private_subnet_ids = pulumi.Output.all(
+            *[s.id for s in self.private_subnets]
+        ).apply(lambda ids: list(ids))
+
+        # 8. Create private route table(s) with NAT route
+        self._create_private_routing(vpc_config.nat_gateway_strategy, child_opts)
+
+        # 9. Create pod subnets if configured
+        self.pod_subnets: list[aws.ec2.Subnet] = []
+        self.pod_subnet_ids: pulumi.Output[list[str]] = pulumi.Output.from_input([])
         if vpc_config.pod_subnets:
-            self.pod_subnet_ids = self._create_pod_subnets(
+            self._create_pod_subnets(
                 vpc_config.pod_subnets,
                 vpc_config.nat_gateway_strategy,
                 child_opts,
             )
 
-        # Create VPC endpoints
+        # 10. Create VPC endpoints
         self._create_vpc_endpoints(vpc_config.vpc_endpoints, child_opts)
+
+        # Collect all route tables for gateway endpoints
+        self._all_route_tables: list[aws.ec2.RouteTable] = [self.public_route_table]
+        self._all_route_tables.extend(self.private_route_tables)
+        if hasattr(self, "pod_route_table"):
+            self._all_route_tables.append(self.pod_route_table)
 
         self.register_outputs(
             {
                 "vpc_id": self.vpc_id,
-                "private_subnet_ids": self.private_subnet_ids,
                 "public_subnet_ids": self.public_subnet_ids,
+                "private_subnet_ids": self.private_subnet_ids,
                 "pod_subnet_ids": self.pod_subnet_ids,
             }
         )
 
-    def _get_cidr_mask(self, cidr: str) -> int:
-        """Extract CIDR mask from CIDR string."""
-        return int(cidr.split("/")[1])
+    def _create_nat_gateways(
+        self,
+        strategy: NatGatewayStrategy,
+        opts: pulumi.ResourceOptions,
+    ) -> None:
+        """Create NAT gateways based on strategy."""
+        if strategy == NatGatewayStrategy.NONE:
+            return
+
+        if strategy == NatGatewayStrategy.SINGLE:
+            # Single NAT in first public subnet
+            eip = aws.ec2.Eip(
+                f"{self._name}-nat-eip",
+                domain="vpc",
+                tags={
+                    "Name": f"{self._name}-nat-eip",
+                    **self._tags,
+                },
+                opts=opts,
+            )
+            self.nat_eips.append(eip)
+
+            nat = aws.ec2.NatGateway(
+                f"{self._name}-nat",
+                subnet_id=self.public_subnets[0].id,
+                allocation_id=eip.id,
+                tags={
+                    "Name": f"{self._name}-nat",
+                    **self._tags,
+                },
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[self.igw, eip, self.public_subnets[0]],
+                ),
+            )
+            self.nat_gateways.append(nat)
+
+        elif strategy == NatGatewayStrategy.ONE_PER_AZ:
+            # One NAT per AZ for high availability
+            for i, subnet in enumerate(self.public_subnets):
+                eip = aws.ec2.Eip(
+                    f"{self._name}-nat-eip-{i}",
+                    domain="vpc",
+                    tags={
+                        "Name": f"{self._name}-nat-eip-{i}",
+                        **self._tags,
+                    },
+                    opts=opts,
+                )
+                self.nat_eips.append(eip)
+
+                nat = aws.ec2.NatGateway(
+                    f"{self._name}-nat-{i}",
+                    subnet_id=subnet.id,
+                    allocation_id=eip.id,
+                    tags={
+                        "Name": f"{self._name}-nat-{i}",
+                        **self._tags,
+                    },
+                    opts=pulumi.ResourceOptions(
+                        parent=self,
+                        provider=self._provider,
+                        depends_on=[self.igw, eip, subnet],
+                    ),
+                )
+                self.nat_gateways.append(nat)
+
+    def _create_private_routing(
+        self,
+        strategy: NatGatewayStrategy,
+        opts: pulumi.ResourceOptions,
+    ) -> None:
+        """Create private route tables with NAT routes."""
+        self.private_route_tables: list[aws.ec2.RouteTable] = []
+
+        if strategy == NatGatewayStrategy.NONE:
+            # Single route table without NAT route
+            rt = aws.ec2.RouteTable(
+                f"{self._name}-private-rt",
+                vpc_id=self.vpc_id,
+                tags={
+                    "Name": f"{self._name}-private-rt",
+                    **self._tags,
+                },
+                opts=opts,
+            )
+            self.private_route_tables.append(rt)
+
+            # Associate all private subnets with this route table
+            for i, subnet in enumerate(self.private_subnets):
+                aws.ec2.RouteTableAssociation(
+                    f"{self._name}-private-rta-{i}",
+                    subnet_id=subnet.id,
+                    route_table_id=rt.id,
+                    opts=pulumi.ResourceOptions(
+                        parent=self,
+                        provider=self._provider,
+                        depends_on=[subnet, rt],
+                    ),
+                )
+
+        elif strategy == NatGatewayStrategy.SINGLE:
+            # Single route table with NAT route
+            rt = aws.ec2.RouteTable(
+                f"{self._name}-private-rt",
+                vpc_id=self.vpc_id,
+                tags={
+                    "Name": f"{self._name}-private-rt",
+                    **self._tags,
+                },
+                opts=opts,
+            )
+            self.private_route_tables.append(rt)
+
+            # Add NAT route
+            aws.ec2.Route(
+                f"{self._name}-private-nat-route",
+                route_table_id=rt.id,
+                destination_cidr_block="0.0.0.0/0",
+                nat_gateway_id=self.nat_gateways[0].id,
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[rt, self.nat_gateways[0]],
+                ),
+            )
+
+            # Associate all private subnets with this route table
+            for i, subnet in enumerate(self.private_subnets):
+                aws.ec2.RouteTableAssociation(
+                    f"{self._name}-private-rta-{i}",
+                    subnet_id=subnet.id,
+                    route_table_id=rt.id,
+                    opts=pulumi.ResourceOptions(
+                        parent=self,
+                        provider=self._provider,
+                        depends_on=[subnet, rt],
+                    ),
+                )
+
+        elif strategy == NatGatewayStrategy.ONE_PER_AZ:
+            # One route table per AZ, each with its own NAT
+            # Build a map of AZ -> (NAT gateway, route table)
+            # Use vpc_config to get AZ strings (resource properties are Outputs)
+            az_to_nat: dict[str, aws.ec2.NatGateway] = {}
+            az_to_rt: dict[str, aws.ec2.RouteTable] = {}
+
+            # NAT gateways are created in order of public subnets
+            for i, (subnet_config, nat) in enumerate(
+                zip(self._public_subnet_configs, self.nat_gateways)
+            ):
+                az = subnet_config.availability_zone
+                az_to_nat[az] = nat
+
+                rt = aws.ec2.RouteTable(
+                    f"{self._name}-private-rt-{i}",
+                    vpc_id=self.vpc_id,
+                    tags={
+                        "Name": f"{self._name}-private-rt-{az[-1]}",
+                        **self._tags,
+                    },
+                    opts=opts,
+                )
+                self.private_route_tables.append(rt)
+                az_to_rt[az] = rt
+
+                # Add NAT route for this AZ
+                aws.ec2.Route(
+                    f"{self._name}-private-nat-route-{i}",
+                    route_table_id=rt.id,
+                    destination_cidr_block="0.0.0.0/0",
+                    nat_gateway_id=nat.id,
+                    opts=pulumi.ResourceOptions(
+                        parent=self,
+                        provider=self._provider,
+                        depends_on=[rt, nat],
+                    ),
+                )
+
+            # Associate each private subnet with its AZ's route table
+            for i, (subnet_config, subnet) in enumerate(
+                zip(self._private_subnet_configs, self.private_subnets)
+            ):
+                subnet_az = subnet_config.availability_zone
+                rt = az_to_rt.get(subnet_az)
+                if rt:
+                    aws.ec2.RouteTableAssociation(
+                        f"{self._name}-private-rta-{i}",
+                        subnet_id=subnet.id,
+                        route_table_id=rt.id,
+                        opts=pulumi.ResourceOptions(
+                            parent=self,
+                            provider=self._provider,
+                            depends_on=[subnet, rt],
+                        ),
+                    )
 
     def _create_pod_subnets(
         self,
         pod_subnets: list[SubnetResolved],
         nat_strategy: NatGatewayStrategy,
         opts: pulumi.ResourceOptions,
-    ) -> list[pulumi.Output[str]]:
+    ) -> None:
         """Create pod subnets for custom networking with proper routing."""
-        pod_subnet_ids = []
-
         # Create route table for pod subnets
-        pod_route_table = aws.ec2.RouteTable(
+        self.pod_route_table = aws.ec2.RouteTable(
             f"{self._name}-pod-rt",
             vpc_id=self.vpc_id,
             tags={
                 "Name": f"{self._name}-pod-rt",
                 **self._tags,
             },
-            opts=pulumi.ResourceOptions(
-                parent=self,
-                provider=self._provider,
-            ),
+            opts=opts,
         )
 
-        # Add route to NAT gateway if NAT is enabled
-        if nat_strategy != NatGatewayStrategy.NONE:
-            # Get NAT gateway ID from AWSX VPC - extract first NAT gateway's ID
-            # We use a separate apply to ensure the type is Output[str] not Output[str | None]
-            nat_gateway_id: pulumi.Output[str] = self.vpc.nat_gateways.apply(
-                lambda nats: nats[0].id if nats and len(nats) > 0 else ""
-            )
-
-            # Create route to NAT gateway
+        # Add route to NAT gateway if NAT is enabled (use first NAT for simplicity)
+        if nat_strategy != NatGatewayStrategy.NONE and self.nat_gateways:
             aws.ec2.Route(
                 f"{self._name}-pod-nat-route",
-                route_table_id=pod_route_table.id,
+                route_table_id=self.pod_route_table.id,
                 destination_cidr_block="0.0.0.0/0",
-                nat_gateway_id=nat_gateway_id,
+                nat_gateway_id=self.nat_gateways[0].id,
                 opts=pulumi.ResourceOptions(
                     parent=self,
                     provider=self._provider,
-                    depends_on=[pod_route_table],
+                    depends_on=[self.pod_route_table, self.nat_gateways[0]],
                 ),
             )
 
-        # Create pod subnets
+        # Create pod subnets using resolved config
+        depends_on = self.secondary_cidr_associations if self.secondary_cidr_associations else []
+
         for i, subnet_config in enumerate(pod_subnets):
-            az = subnet_config.availability_zone
-            subnet_name = subnet_config.name
-
-            depends_on = (
-                self.secondary_cidr_associations if self.secondary_cidr_associations else []
-            )
-
             subnet = aws.ec2.Subnet(
                 f"{self._name}-pod-subnet-{i}",
                 vpc_id=self.vpc_id,
                 cidr_block=subnet_config.cidr_block,
-                availability_zone=az,
+                availability_zone=subnet_config.availability_zone,
                 map_public_ip_on_launch=False,
                 tags={
-                    "Name": subnet_name,
+                    "Name": subnet_config.name,
                     "SubnetType": "pod",
                     "kubernetes.io/role/internal-elb": "1",
                     "karpenter.sh/discovery": self._name,
@@ -200,21 +466,23 @@ class Networking(pulumi.ComponentResource):
                     depends_on=depends_on,
                 ),
             )
-            pod_subnet_ids.append(subnet.id)
+            self.pod_subnets.append(subnet)
 
             # Associate subnet with pod route table
             aws.ec2.RouteTableAssociation(
-                f"{self._name}-pod-subnet-{i}-rta",
+                f"{self._name}-pod-rta-{i}",
                 subnet_id=subnet.id,
-                route_table_id=pod_route_table.id,
+                route_table_id=self.pod_route_table.id,
                 opts=pulumi.ResourceOptions(
                     parent=self,
                     provider=self._provider,
-                    depends_on=[subnet, pod_route_table],
+                    depends_on=[subnet, self.pod_route_table],
                 ),
             )
 
-        return pod_subnet_ids
+        self.pod_subnet_ids = pulumi.Output.all(
+            *[s.id for s in self.pod_subnets]
+        ).apply(lambda ids: list(ids))
 
     def _create_vpc_endpoints(
         self,
@@ -222,7 +490,7 @@ class Networking(pulumi.ComponentResource):
         opts: pulumi.ResourceOptions,
     ) -> None:
         """Create VPC endpoints based on configuration."""
-        # Create security group for interface endpoints
+        # Determine if we need a security group for interface endpoints
         has_interface_endpoints = any(
             [
                 endpoints_config.ecr_api,
@@ -267,18 +535,21 @@ class Networking(pulumi.ComponentResource):
                 opts=opts,
             )
 
+        # Collect all route table IDs for gateway endpoints
+        all_route_table_ids = pulumi.Output.all(
+            self.public_route_table.id,
+            *[rt.id for rt in self.private_route_tables],
+            *([self.pod_route_table.id] if hasattr(self, "pod_route_table") else []),
+        ).apply(lambda ids: list(ids))
+
         # S3 Gateway Endpoint
         if endpoints_config.s3:
-            route_table_ids = self.vpc.route_tables.apply(
-                lambda rts: [rt.id for rt in rts] if rts else []
-            )
-
             aws.ec2.VpcEndpoint(
                 f"{self._name}-s3-endpoint",
                 vpc_id=self.vpc_id,
                 service_name=f"com.amazonaws.{self._get_region()}.s3",
                 vpc_endpoint_type="Gateway",
-                route_table_ids=route_table_ids,
+                route_table_ids=all_route_table_ids,
                 tags={
                     "Name": f"{self._name}-s3-endpoint",
                     **self._tags,
@@ -288,16 +559,12 @@ class Networking(pulumi.ComponentResource):
 
         # DynamoDB Gateway Endpoint
         if endpoints_config.dynamodb:
-            route_table_ids = self.vpc.route_tables.apply(
-                lambda rts: [rt.id for rt in rts] if rts else []
-            )
-
             aws.ec2.VpcEndpoint(
                 f"{self._name}-dynamodb-endpoint",
                 vpc_id=self.vpc_id,
                 service_name=f"com.amazonaws.{self._get_region()}.dynamodb",
                 vpc_endpoint_type="Gateway",
-                route_table_ids=route_table_ids,
+                route_table_ids=all_route_table_ids,
                 tags={
                     "Name": f"{self._name}-dynamodb-endpoint",
                     **self._tags,
@@ -342,5 +609,6 @@ class Networking(pulumi.ComponentResource):
     def _get_region(self) -> str:
         """Get the AWS region from availability zones."""
         if self._availability_zones:
+            # Extract region by removing the AZ suffix (e.g., "us-east-1a" -> "us-east-1")
             return self._availability_zones[0][:-1]
         return "us-east-1"
