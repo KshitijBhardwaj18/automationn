@@ -91,13 +91,6 @@ class Networking(pulumi.ComponentResource):
         self.private_subnet_ids = self.vpc.private_subnet_ids
         self.public_subnet_ids = self.vpc.public_subnet_ids
 
-        # Get route table IDs from AWSX VPC for later use
-        self._private_route_table_ids = self.vpc.route_tables.apply(
-            lambda rts: [rt.id for rt in rts if rt.tags.get("Name", "").find("private") != -1]
-            if rts
-            else []
-        )
-
         # Add secondary CIDR blocks if specified
         self.secondary_cidr_associations = []
         for i, secondary_cidr in enumerate(vpc_config.secondary_cidr_blocks):
