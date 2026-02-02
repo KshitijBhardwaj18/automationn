@@ -1,0 +1,16 @@
+*.pyc
+__pycache__/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.cache/
+.local/
+.ruff_cache/
+*.db
+byoc_platform.db
+.env
+!.env.example
+config/*
+ 

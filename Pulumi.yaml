@@ -1,0 +1,11 @@
+name: byoc-platform
+description: BYOC Platform - Multi-tenant infrastructure deployment system
+runtime:
+  name: python
+  options:
+    toolchain: pip
+    virtualenv: venv
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: aws-python

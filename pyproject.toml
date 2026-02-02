@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automation"
+version = "0.1.0"
+description = "BYOC Platform automation"
+requires-python = ">=3.11"
+dependencies = [
+    "pulumi>=3.0.0,<4.0.0",
+    "pulumi-aws>=7.0.0,<8.0.0",
+    "pulumi-awsx>=3.0.0,<4.0.0",
+    "pulumi-eks>=4.0.0,<5.0.0",
+    "pulumi-kubernetes>=4.0.0,<5.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.24.0",
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.19.0",
+]
+
+[tool.setuptools]
+packages = ["api", "infra"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = "venv"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

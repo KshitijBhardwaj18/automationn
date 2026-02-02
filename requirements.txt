@@ -1,0 +1,25 @@
+# Pulumi core and providers
+pulumi>=3.0.0,<4.0.0
+pulumi-aws>=7.0.0,<8.0.0
+pulumi-awsx>=3.0.0,<4.0.0
+pulumi-eks>=4.0.0,<5.0.0
+pulumi-kubernetes>=4.0.0,<5.0.0
+
+# FastAPI and web
+fastapi>=0.100.0
+uvicorn>=0.20.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+httpx>=0.24.0
+
+# Database
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
+
+# Environment
+python-dotenv>=1.0.0
+
+# Development tools
+pyright>=1.1.0
+ruff>=0.1.0
+black>=23.0.0
