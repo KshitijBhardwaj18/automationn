@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from api.models import CustomerOnboardRequest, EksMode
+from api.models import CustomerConfigResolved, EksMode
 
 PULUMI_API_BASE = "https://api.pulumi.com"
 
@@ -55,7 +55,7 @@ class PulumiDeploymentsClient:
         self,
         project_name: str,
         stack_name: str,
-        request: CustomerOnboardRequest,
+        config: CustomerConfigResolved,
         repo_url: str,
         repo_branch: str = "main",
         repo_dir: str = ".",
@@ -68,7 +68,7 @@ class PulumiDeploymentsClient:
 
         stack_id = f"{self.organization}/{project_name}/{stack_name}"
 
-        pre_run_commands = self._build_pre_run_commands(stack_id, request)
+        pre_run_commands = self._build_pre_run_commands(stack_id, config)
 
         source_context: dict[str, Any] = {
             "git": {
@@ -88,7 +88,7 @@ class PulumiDeploymentsClient:
                 "environmentVariables": {
                     "AWS_ACCESS_KEY_ID": self.aws_access_key_id,
                     "AWS_SECRET_ACCESS_KEY": {"secret": self.aws_secret_access_key},
-                    "AWS_REGION": request.aws_region,
+                    "AWS_REGION": config.aws_config.region,
                 },
             },
         }
@@ -106,9 +106,9 @@ class PulumiDeploymentsClient:
     def _build_pre_run_commands(
         self,
         stack_id: str,
-        request: CustomerOnboardRequest,
+        config: CustomerConfigResolved,
     ) -> list[str]:
-        """Build pre-run commands to set all Pulumi config values."""
+        """Build pre-run commands to set all Pulumi config values from resolved config."""
         commands = [
             "pip install -r requirements.txt",
         ]
@@ -120,53 +120,39 @@ class PulumiDeploymentsClient:
             return f"pulumi config set --stack {stack_id} {secret_flag}{key} '{escaped_value}'"
 
         # Basic settings
-        commands.append(config_set("customerId", request.customer_id))
-        commands.append(config_set("environment", request.environment))
-        commands.append(config_set("customerRoleArn", request.role_arn))
-        commands.append(config_set("externalId", request.external_id, secret=True))
-        commands.append(config_set("awsRegion", request.aws_region))
+        commands.append(config_set("customerId", config.customer_id))
+        commands.append(config_set("environment", config.environment))
+        commands.append(config_set("customerRoleArn", config.aws_config.role_arn))
+        commands.append(config_set("externalId", config.aws_config.external_id, secret=True))
+        commands.append(config_set("awsRegion", config.aws_config.region))
 
         # Availability zones
-        if request.availability_zones:
-            az_str = ",".join(request.availability_zones)
-            commands.append(config_set("availabilityZones", az_str))
+        az_str = ",".join(config.aws_config.availability_zones)
+        commands.append(config_set("availabilityZones", az_str))
 
         # VPC Configuration
-        vpc = request.vpc_config
+        vpc = config.vpc_config
         commands.append(config_set("vpcCidr", vpc.cidr_block))
         commands.append(config_set("natGatewayStrategy", vpc.nat_gateway_strategy.value))
 
         if vpc.secondary_cidr_blocks:
             commands.append(config_set("secondaryCidrBlocks", ",".join(vpc.secondary_cidr_blocks)))
 
-        # Public subnet configuration
-        if vpc.public_subnets:
-            if vpc.public_subnets.cidr_mask:
-                commands.append(config_set("publicSubnetCidrMask", str(vpc.public_subnets.cidr_mask)))
-            if vpc.public_subnets.custom_subnets:
-                subnets_json = json.dumps([s.model_dump() for s in vpc.public_subnets.custom_subnets])
-                commands.append(config_set("publicCustomSubnets", subnets_json))
+        # Subnets - serialize as JSON
+        public_subnets_json = json.dumps([s.model_dump() for s in vpc.public_subnets])
+        commands.append(config_set("publicSubnets", public_subnets_json))
 
-        # Private subnet configuration
-        if vpc.private_subnets:
-            if vpc.private_subnets.cidr_mask:
-                commands.append(config_set("privateSubnetCidrMask", str(vpc.private_subnets.cidr_mask)))
-            if vpc.private_subnets.custom_subnets:
-                subnets_json = json.dumps([s.model_dump() for s in vpc.private_subnets.custom_subnets])
-                commands.append(config_set("privateCustomSubnets", subnets_json))
+        private_subnets_json = json.dumps([s.model_dump() for s in vpc.private_subnets])
+        commands.append(config_set("privateSubnets", private_subnets_json))
 
-        # Pod subnet configuration
-        if vpc.pod_subnets and vpc.pod_subnets.enabled:
-            commands.append(config_set("podSubnetsEnabled", "true"))
-            if vpc.pod_subnets.cidr_mask:
-                commands.append(config_set("podSubnetCidrMask", str(vpc.pod_subnets.cidr_mask)))
-            if vpc.pod_subnets.custom_subnets:
-                subnets_json = json.dumps([s.model_dump() for s in vpc.pod_subnets.custom_subnets])
-                commands.append(config_set("podCustomSubnets", subnets_json))
+        if vpc.pod_subnets:
+            pod_subnets_json = json.dumps([s.model_dump() for s in vpc.pod_subnets])
+            commands.append(config_set("podSubnets", pod_subnets_json))
 
         # VPC Endpoints
         endpoints = vpc.vpc_endpoints
-        commands.append(config_set("vpcEndpointS3", str(endpoints.s3_gateway).lower()))
+        commands.append(config_set("vpcEndpointS3", str(endpoints.s3).lower()))
+        commands.append(config_set("vpcEndpointDynamodb", str(endpoints.dynamodb).lower()))
         commands.append(config_set("vpcEndpointEcrApi", str(endpoints.ecr_api).lower()))
         commands.append(config_set("vpcEndpointEcrDkr", str(endpoints.ecr_dkr).lower()))
         commands.append(config_set("vpcEndpointSts", str(endpoints.sts).lower()))
@@ -175,29 +161,37 @@ class PulumiDeploymentsClient:
         commands.append(config_set("vpcEndpointSsm", str(endpoints.ssm).lower()))
         commands.append(config_set("vpcEndpointSsmMessages", str(endpoints.ssmmessages).lower()))
         commands.append(config_set("vpcEndpointEc2Messages", str(endpoints.ec2messages).lower()))
+        commands.append(config_set("vpcEndpointElb", str(endpoints.elasticloadbalancing).lower()))
+        commands.append(config_set("vpcEndpointAutoscaling", str(endpoints.autoscaling).lower()))
 
         # DNS settings
         commands.append(config_set("enableDnsHostnames", str(vpc.enable_dns_hostnames).lower()))
         commands.append(config_set("enableDnsSupport", str(vpc.enable_dns_support).lower()))
 
         # EKS Configuration
-        eks = request.eks_config
+        eks = config.eks_config
         commands.append(config_set("eksVersion", eks.version))
         commands.append(config_set("eksMode", eks.mode.value))
         commands.append(config_set("serviceIpv4Cidr", eks.service_ipv4_cidr))
 
         # EKS Access Configuration
         access = eks.access
-        commands.append(config_set("endpointAccess", access.endpoint_access.value))
-        commands.append(config_set("grantAdminToCreator", str(access.grant_admin_to_creator).lower()))
+        commands.append(
+            config_set("endpointPrivateAccess", str(access.endpoint_private_access).lower())
+        )
+        commands.append(
+            config_set("endpointPublicAccess", str(access.endpoint_public_access).lower())
+        )
+        commands.append(
+            config_set(
+                "bootstrapClusterCreatorAdmin",
+                str(access.bootstrap_cluster_creator_admin_permissions).lower(),
+            )
+        )
         commands.append(config_set("authenticationMode", access.authentication_mode))
 
         if access.public_access_cidrs:
             commands.append(config_set("publicAccessCidrs", ",".join(access.public_access_cidrs)))
-
-        if access.access_entries:
-            entries_json = json.dumps([e.model_dump() for e in access.access_entries])
-            commands.append(config_set("accessEntries", entries_json))
 
         # EKS Logging
         commands.append(config_set("loggingEnabled", str(eks.logging_enabled).lower()))
@@ -213,24 +207,45 @@ class PulumiDeploymentsClient:
         commands.append(config_set("deletionProtection", str(eks.deletion_protection).lower()))
         commands.append(config_set("zonalShiftEnabled", str(eks.zonal_shift_enabled).lower()))
 
-        # Node Group Configuration (for managed mode)
-        if eks.mode == EksMode.MANAGED and request.node_group_config:
-            ng = request.node_group_config
-            commands.append(config_set("nodeGroupName", ng.name))
-            commands.append(config_set("nodeInstanceTypes", ",".join(ng.instance_types)))
-            commands.append(config_set("nodeDesiredSize", str(ng.desired_size)))
-            commands.append(config_set("nodeMinSize", str(ng.min_size)))
-            commands.append(config_set("nodeMaxSize", str(ng.max_size)))
-            commands.append(config_set("nodeDiskSize", str(ng.disk_size)))
-            commands.append(config_set("nodeCapacityType", ng.capacity_type))
-            commands.append(config_set("nodeAmiType", ng.ami_type))
+        # EKS Addons
+        addons = eks.addons
+        commands.append(config_set("addonVpcCni", str(addons.vpc_cni.enabled).lower()))
+        commands.append(config_set("addonCoredns", str(addons.coredns.enabled).lower()))
+        commands.append(config_set("addonKubeProxy", str(addons.kube_proxy.enabled).lower()))
+        commands.append(config_set("addonEbsCsi", str(addons.ebs_csi_driver.enabled).lower()))
+        commands.append(config_set("addonEfsCsi", str(addons.efs_csi_driver.enabled).lower()))
+        commands.append(
+            config_set("addonPodIdentity", str(addons.pod_identity_agent.enabled).lower())
+        )
+        commands.append(
+            config_set("addonSnapshot", str(addons.snapshot_controller.enabled).lower())
+        )
 
-            if ng.labels:
-                commands.append(config_set("nodeLabels", json.dumps(ng.labels)))
+        # Node Groups (for managed mode)
+        if eks.mode == EksMode.MANAGED and eks.node_groups:
+            node_groups_json = json.dumps(
+                [
+                    {
+                        "name": ng.name,
+                        "instance_types": ng.instance_types,
+                        "capacity_type": ng.capacity_type.value,
+                        "ami_type": ng.ami_type.value,
+                        "disk_size": ng.disk_size,
+                        "desired_size": ng.desired_size,
+                        "min_size": ng.min_size,
+                        "max_size": ng.max_size,
+                        "labels": ng.labels,
+                        "taints": ng.taints,
+                        "tags": ng.tags,
+                    }
+                    for ng in eks.node_groups
+                ]
+            )
+            commands.append(config_set("nodeGroups", node_groups_json))
 
-        # Custom Tags
-        if request.tags:
-            commands.append(config_set("tags", json.dumps(request.tags)))
+        # Global Tags
+        if config.tags:
+            commands.append(config_set("tags", json.dumps(config.tags)))
 
         return commands
 
