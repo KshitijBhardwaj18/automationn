@@ -91,13 +91,6 @@ class Networking(pulumi.ComponentResource):
         self.private_subnet_ids = self.vpc.private_subnet_ids
         self.public_subnet_ids = self.vpc.public_subnet_ids
 
-        # Get route table IDs from AWSX VPC for later use
-        self._private_route_table_ids = self.vpc.route_tables.apply(
-            lambda rts: [rt.id for rt in rts if rt.tags.get("Name", "").find("private") != -1]
-            if rts
-            else []
-        )
-
         # Add secondary CIDR blocks if specified
         self.secondary_cidr_associations = []
         for i, secondary_cidr in enumerate(vpc_config.secondary_cidr_blocks):
@@ -159,9 +152,10 @@ class Networking(pulumi.ComponentResource):
 
         # Add route to NAT gateway if NAT is enabled
         if nat_strategy != NatGatewayStrategy.NONE:
-            # Get NAT gateway ID from AWSX VPC
-            nat_gateway_id = self.vpc.nat_gateways.apply(
-                lambda nats: nats[0].id if nats and len(nats) > 0 else None
+            # Get NAT gateway ID from AWSX VPC - extract first NAT gateway's ID
+            # We use a separate apply to ensure the type is Output[str] not Output[str | None]
+            nat_gateway_id: pulumi.Output[str] = self.vpc.nat_gateways.apply(
+                lambda nats: nats[0].id if nats and len(nats) > 0 else ""
             )
 
             # Create route to NAT gateway

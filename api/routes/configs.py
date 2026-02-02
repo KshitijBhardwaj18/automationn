@@ -1,5 +1,7 @@
 """Customer configuration management endpoints."""
 
+from typing import Union
+
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 
@@ -37,7 +39,9 @@ The fully-resolved configuration is stored and can be used for deployments.
         409: {"description": "Configuration already exists"},
     },
 )
-async def create_config(request: CustomerConfigInput) -> CustomerConfigResponse:
+async def create_config(
+    request: CustomerConfigInput,
+) -> Union[CustomerConfigResponse, JSONResponse]:
     """Create a new customer configuration."""
     # Check if config already exists
     if config_storage.exists(request.customer_id):
@@ -136,7 +140,7 @@ All fields are replaced (this is not a partial update).
 async def update_config(
     customer_id: str,
     request: CustomerConfigInput,
-) -> CustomerConfigResponse:
+) -> Union[CustomerConfigResponse, JSONResponse]:
     """Update a customer configuration."""
     # Check if config exists
     existing_config = config_storage.get(customer_id)
@@ -206,7 +210,7 @@ Useful for testing configurations before creating them.
 )
 async def validate_config_endpoint(
     request: CustomerConfigInput,
-) -> CustomerConfigResponse:
+) -> Union[CustomerConfigResponse, JSONResponse]:
     """Validate a configuration without saving it."""
     try:
         # Resolve config with defaults

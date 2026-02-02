@@ -1,6 +1,6 @@
 """SQLite database for tracking customer deployments."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
@@ -45,9 +45,14 @@ class CustomerDeploymentRecord(Base):
     pulumi_deployment_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     outputs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -129,7 +134,7 @@ class Database:
                 return None
 
             record.status = status
-            record.updated_at = datetime.utcnow()
+            record.updated_at = datetime.now(timezone.utc)
 
             if pulumi_deployment_id:
                 record.pulumi_deployment_id = pulumi_deployment_id
