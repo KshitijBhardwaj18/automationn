@@ -1,14 +1,16 @@
+"""EKS cluster infrastructure component."""
+
 from typing import Sequence
 
 import pulumi
 import pulumi_aws as aws
+import pulumi_tls as tls
 
 from api.models import (
-    EksAccessConfig,
-    EksConfig,
+    EksAccessResolved,
+    EksConfigResolved,
     EksMode,
-    EndpointAccess,
-    NodeGroupConfig,
+    NodeGroupResolved,
 )
 
 
@@ -24,8 +26,7 @@ class EksCluster(pulumi.ComponentResource):
         public_subnet_ids: pulumi.Output[Sequence[str]],
         cluster_role_arn: pulumi.Output[str],
         node_role_arn: pulumi.Output[str],
-        eks_config: EksConfig,
-        node_group_config: NodeGroupConfig | None,
+        eks_config: EksConfigResolved,
         provider: aws.Provider,
         tags: dict[str, str] | None = None,
         opts: pulumi.ResourceOptions | None = None,
@@ -42,9 +43,12 @@ class EksCluster(pulumi.ComponentResource):
         self.cluster_sg = self._create_cluster_security_group(vpc_id, child_opts)
 
         # Determine which subnets to use based on endpoint access
-        if eks_config.access.endpoint_access == EndpointAccess.PRIVATE:
+        access = eks_config.access
+        if access.endpoint_private_access and not access.endpoint_public_access:
+            # Private only - use private subnets
             subnet_ids = private_subnet_ids
         else:
+            # Public or both - use all subnets
             subnet_ids = pulumi.Output.all(private_subnet_ids, public_subnet_ids).apply(
                 lambda args: list(args[0]) + list(args[1])
             )
@@ -53,7 +57,7 @@ class EksCluster(pulumi.ComponentResource):
         vpc_config_args = self._build_vpc_config(
             subnet_ids=subnet_ids,
             security_group_ids=[self.cluster_sg.id],
-            access_config=eks_config.access,
+            access_config=access,
         )
 
         # Build cluster arguments
@@ -69,8 +73,8 @@ class EksCluster(pulumi.ComponentResource):
 
         # Add access config
         cluster_args["access_config"] = aws.eks.ClusterAccessConfigArgs(
-            authentication_mode=eks_config.access.authentication_mode,
-            bootstrap_cluster_creator_admin_permissions=eks_config.access.grant_admin_to_creator,
+            authentication_mode=access.authentication_mode,
+            bootstrap_cluster_creator_admin_permissions=access.bootstrap_cluster_creator_admin_permissions,
         )
 
         # Add kubernetes network config (service CIDR)
@@ -79,7 +83,7 @@ class EksCluster(pulumi.ComponentResource):
         }
 
         # Add logging if enabled
-        if eks_config.logging_enabled:
+        if eks_config.logging_enabled and eks_config.logging_types:
             cluster_args["enabled_cluster_log_types"] = eks_config.logging_types
 
         # Add encryption if enabled
@@ -150,15 +154,15 @@ class EksCluster(pulumi.ComponentResource):
         # Create OIDC provider for IRSA
         self.oidc_provider = self._create_oidc_provider(child_opts)
 
-        # Create addons and node group for managed mode
+        # Create addons and node groups for managed mode
         if eks_config.mode == EksMode.MANAGED:
-            self._create_addons(child_opts)
+            self._create_addons(eks_config, child_opts)
 
-            if node_group_config:
-                self.node_group = self._create_node_group(
+            for ng_config in eks_config.node_groups:
+                self._create_node_group(
                     node_role_arn=node_role_arn,
                     private_subnet_ids=private_subnet_ids,
-                    node_group_config=node_group_config,
+                    node_group_config=ng_config,
                     child_opts=child_opts,
                 )
 
@@ -246,7 +250,8 @@ class EksCluster(pulumi.ComponentResource):
         """Create OIDC provider for IAM Roles for Service Accounts (IRSA)."""
         oidc_issuer = self.cluster.identities[0].oidcs[0].issuer
 
-        tls_cert = oidc_issuer.apply(lambda url: aws.tls.get_certificate(url=url))
+        # Use pulumi_tls to get the certificate (not aws.tls which doesn't exist)
+        tls_cert = oidc_issuer.apply(lambda url: tls.get_certificate(url=url))
         thumbprint = tls_cert.apply(lambda cert: cert.certificates[0].sha1_fingerprint)
 
         return aws.iam.OpenIdConnectProvider(
@@ -265,65 +270,112 @@ class EksCluster(pulumi.ComponentResource):
             ),
         )
 
-    def _create_addons(self, opts: pulumi.ResourceOptions) -> None:
-        """Create essential EKS addons for managed mode."""
+    def _create_addons(
+        self,
+        eks_config: EksConfigResolved,
+        opts: pulumi.ResourceOptions,
+    ) -> None:
+        """Create EKS addons for managed mode."""
+        addons = eks_config.addons
+
         # VPC CNI addon
-        self.vpc_cni_addon = aws.eks.Addon(
-            f"{self._name}-vpc-cni",
-            cluster_name=self.cluster.name,
-            addon_name="vpc-cni",
-            resolve_conflicts_on_create="OVERWRITE",
-            resolve_conflicts_on_update="OVERWRITE",
-            tags={"Name": f"{self._name}-vpc-cni", **self._tags},
-            opts=pulumi.ResourceOptions(
-                parent=self,
-                provider=self._provider,
-                depends_on=[self.cluster],
-            ),
-        )
+        if addons.vpc_cni.enabled:
+            self.vpc_cni_addon = aws.eks.Addon(
+                f"{self._name}-vpc-cni",
+                cluster_name=self.cluster.name,
+                addon_name="vpc-cni",
+                resolve_conflicts_on_create=addons.vpc_cni.resolve_conflicts_on_create,
+                resolve_conflicts_on_update=addons.vpc_cni.resolve_conflicts_on_update,
+                tags={"Name": f"{self._name}-vpc-cni", **self._tags},
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[self.cluster],
+                ),
+            )
 
         # kube-proxy addon
-        self.kube_proxy_addon = aws.eks.Addon(
-            f"{self._name}-kube-proxy",
-            cluster_name=self.cluster.name,
-            addon_name="kube-proxy",
-            resolve_conflicts_on_create="OVERWRITE",
-            resolve_conflicts_on_update="OVERWRITE",
-            tags={"Name": f"{self._name}-kube-proxy", **self._tags},
-            opts=pulumi.ResourceOptions(
-                parent=self,
-                provider=self._provider,
-                depends_on=[self.cluster],
-            ),
-        )
+        if addons.kube_proxy.enabled:
+            self.kube_proxy_addon = aws.eks.Addon(
+                f"{self._name}-kube-proxy",
+                cluster_name=self.cluster.name,
+                addon_name="kube-proxy",
+                resolve_conflicts_on_create=addons.kube_proxy.resolve_conflicts_on_create,
+                resolve_conflicts_on_update=addons.kube_proxy.resolve_conflicts_on_update,
+                tags={"Name": f"{self._name}-kube-proxy", **self._tags},
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[self.cluster],
+                ),
+            )
 
         # CoreDNS addon
-        self.coredns_addon = aws.eks.Addon(
-            f"{self._name}-coredns",
-            cluster_name=self.cluster.name,
-            addon_name="coredns",
-            resolve_conflicts_on_create="OVERWRITE",
-            resolve_conflicts_on_update="OVERWRITE",
-            tags={"Name": f"{self._name}-coredns", **self._tags},
-            opts=pulumi.ResourceOptions(
-                parent=self,
-                provider=self._provider,
-                depends_on=[self.cluster, self.vpc_cni_addon],
-            ),
-        )
+        if addons.coredns.enabled:
+            depends = [self.cluster]
+            if addons.vpc_cni.enabled:
+                depends.append(self.vpc_cni_addon)
+
+            self.coredns_addon = aws.eks.Addon(
+                f"{self._name}-coredns",
+                cluster_name=self.cluster.name,
+                addon_name="coredns",
+                resolve_conflicts_on_create=addons.coredns.resolve_conflicts_on_create,
+                resolve_conflicts_on_update=addons.coredns.resolve_conflicts_on_update,
+                tags={"Name": f"{self._name}-coredns", **self._tags},
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=depends,
+                ),
+            )
+
+        # EBS CSI Driver addon
+        if addons.ebs_csi_driver.enabled:
+            self.ebs_csi_addon = aws.eks.Addon(
+                f"{self._name}-ebs-csi",
+                cluster_name=self.cluster.name,
+                addon_name="aws-ebs-csi-driver",
+                resolve_conflicts_on_create=addons.ebs_csi_driver.resolve_conflicts_on_create,
+                resolve_conflicts_on_update=addons.ebs_csi_driver.resolve_conflicts_on_update,
+                tags={"Name": f"{self._name}-ebs-csi", **self._tags},
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[self.cluster],
+                ),
+            )
+
+        # Pod Identity Agent addon
+        if addons.pod_identity_agent.enabled:
+            self.pod_identity_addon = aws.eks.Addon(
+                f"{self._name}-pod-identity",
+                cluster_name=self.cluster.name,
+                addon_name="eks-pod-identity-agent",
+                resolve_conflicts_on_create=addons.pod_identity_agent.resolve_conflicts_on_create,
+                resolve_conflicts_on_update=addons.pod_identity_agent.resolve_conflicts_on_update,
+                tags={"Name": f"{self._name}-pod-identity", **self._tags},
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[self.cluster],
+                ),
+            )
 
     def _create_node_group(
         self,
         node_role_arn: pulumi.Output[str],
         private_subnet_ids: pulumi.Output[Sequence[str]],
-        node_group_config: NodeGroupConfig,
+        node_group_config: NodeGroupResolved,
         child_opts: pulumi.ResourceOptions,
     ) -> aws.eks.NodeGroup:
         """Create managed node group with launch template."""
+        ng_name = node_group_config.name
+
         # Create launch template for better control
         launch_template = aws.ec2.LaunchTemplate(
-            f"{self._name}-node-launch-template",
-            name_prefix=f"{self._name}-node-",
+            f"{self._name}-{ng_name}-launch-template",
+            name_prefix=f"{self._name}-{ng_name}-",
             metadata_options=aws.ec2.LaunchTemplateMetadataOptionsArgs(
                 http_endpoint="enabled",
                 http_tokens="required",  # Require IMDSv2
@@ -343,14 +395,14 @@ class EksCluster(pulumi.ComponentResource):
             tag_specifications=[
                 aws.ec2.LaunchTemplateTagSpecificationArgs(
                     resource_type="instance",
-                    tags={"Name": f"{self._name}-node", **self._tags},
+                    tags={"Name": f"{self._name}-{ng_name}-node", **self._tags},
                 ),
                 aws.ec2.LaunchTemplateTagSpecificationArgs(
                     resource_type="volume",
-                    tags={"Name": f"{self._name}-node-volume", **self._tags},
+                    tags={"Name": f"{self._name}-{ng_name}-volume", **self._tags},
                 ),
             ],
-            tags={"Name": f"{self._name}-node-launch-template", **self._tags},
+            tags={"Name": f"{self._name}-{ng_name}-launch-template", **self._tags},
             opts=pulumi.ResourceOptions(parent=self, provider=self._provider),
         )
 
@@ -366,10 +418,15 @@ class EksCluster(pulumi.ComponentResource):
                 for t in node_group_config.taints
             ]
 
+        # Determine dependencies
+        depends = [self.cluster]
+        if hasattr(self, "vpc_cni_addon"):
+            depends.append(self.vpc_cni_addon)
+
         return aws.eks.NodeGroup(
-            f"{self._name}-eks-node-group",
+            f"{self._name}-{ng_name}-node-group",
             cluster_name=self.cluster.name,
-            node_group_name=node_group_config.name,
+            node_group_name=ng_name,
             node_role_arn=node_role_arn,
             subnet_ids=private_subnet_ids,
             launch_template=aws.eks.NodeGroupLaunchTemplateArgs(
@@ -377,8 +434,8 @@ class EksCluster(pulumi.ComponentResource):
                 version=launch_template.latest_version,
             ),
             instance_types=node_group_config.instance_types,
-            capacity_type=node_group_config.capacity_type,
-            ami_type=node_group_config.ami_type,
+            capacity_type=node_group_config.capacity_type.value,
+            ami_type=node_group_config.ami_type.value,
             scaling_config=aws.eks.NodeGroupScalingConfigArgs(
                 desired_size=node_group_config.desired_size,
                 min_size=node_group_config.min_size,
@@ -389,11 +446,11 @@ class EksCluster(pulumi.ComponentResource):
             ),
             labels=node_group_config.labels if node_group_config.labels else None,
             taints=node_taints,
-            tags={"Name": f"{self._name}-{node_group_config.name}", **self._tags},
+            tags={"Name": f"{self._name}-{ng_name}", **self._tags},
             opts=pulumi.ResourceOptions(
                 parent=self,
                 provider=self._provider,
-                depends_on=[self.cluster, self.vpc_cni_addon],
+                depends_on=depends,
             ),
         )
 
@@ -401,26 +458,17 @@ class EksCluster(pulumi.ComponentResource):
         self,
         subnet_ids: pulumi.Output[Sequence[str]],
         security_group_ids: list[pulumi.Output[str]],
-        access_config: EksAccessConfig,
+        access_config: EksAccessResolved,
     ) -> aws.eks.ClusterVpcConfigArgs:
         """Build VPC configuration for the cluster."""
-        endpoint_private_access = access_config.endpoint_access in [
-            EndpointAccess.PRIVATE,
-            EndpointAccess.PUBLIC_AND_PRIVATE,
-        ]
-        endpoint_public_access = access_config.endpoint_access in [
-            EndpointAccess.PUBLIC,
-            EndpointAccess.PUBLIC_AND_PRIVATE,
-        ]
-
         vpc_config_args: dict = {
             "subnet_ids": subnet_ids,
             "security_group_ids": security_group_ids,
-            "endpoint_private_access": endpoint_private_access,
-            "endpoint_public_access": endpoint_public_access,
+            "endpoint_private_access": access_config.endpoint_private_access,
+            "endpoint_public_access": access_config.endpoint_public_access,
         }
 
-        if endpoint_public_access and access_config.public_access_cidrs:
+        if access_config.endpoint_public_access and access_config.public_access_cidrs:
             vpc_config_args["public_access_cidrs"] = access_config.public_access_cidrs
 
         return aws.eks.ClusterVpcConfigArgs(**vpc_config_args)

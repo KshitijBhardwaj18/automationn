@@ -1,18 +1,14 @@
 """VPC and networking infrastructure for BYOC platform."""
 
-import ipaddress
-
 import pulumi
 import pulumi_aws as aws
 import pulumi_awsx as awsx
 
 from api.models import (
     NatGatewayStrategy,
-    PodSubnetConfig,
-    SubnetConfig,
-    SubnetGroupConfig,
-    VpcConfig,
-    VpcEndpointsConfig,
+    SubnetResolved,
+    VpcConfigResolved,
+    VpcEndpointsResolved,
 )
 
 
@@ -26,38 +22,13 @@ def _get_nat_strategy(strategy: NatGatewayStrategy) -> awsx.ec2.NatGatewayStrate
     return mapping[strategy]
 
 
-def _calculate_subnet_cidrs(
-    vpc_cidr: str,
-    availability_zones: list[str],
-    cidr_mask: int,
-    offset_blocks: int = 0,
-) -> list[SubnetConfig]:
-    """Calculate subnet CIDRs automatically from VPC CIDR."""
-    vpc_network = ipaddress.ip_network(vpc_cidr, strict=False)
-    subnets = []
-
-    for i, az in enumerate(availability_zones):
-        block_index = offset_blocks + i
-        subnet_offset = block_index * (2 ** (32 - cidr_mask))
-        subnet_addr = ipaddress.ip_address(int(vpc_network.network_address) + subnet_offset)
-        subnet_cidr = f"{subnet_addr}/{cidr_mask}"
-        subnets.append(
-            SubnetConfig(
-                cidr_block=subnet_cidr,
-                availability_zone=az,
-            )
-        )
-
-    return subnets
-
-
 class Networking(pulumi.ComponentResource):
     """VPC and networking infrastructure for a customer."""
 
     def __init__(
         self,
         name: str,
-        vpc_config: VpcConfig,
+        vpc_config: VpcConfigResolved,
         availability_zones: list[str],
         provider: aws.Provider,
         tags: dict[str, str] | None = None,
@@ -72,27 +43,15 @@ class Networking(pulumi.ComponentResource):
         self._provider = provider
         self._vpc_cidr = vpc_config.cidr_block
 
-        # Determine subnet configurations
-        public_subnets = self._resolve_subnet_config(
-            vpc_config.cidr_block,
-            vpc_config.public_subnets,
-            default_mask=24,
-            offset_blocks=0,
-        )
-
-        public_block_count = len(availability_zones)
-        private_subnets = self._resolve_subnet_config(
-            vpc_config.cidr_block,
-            vpc_config.private_subnets,
-            default_mask=20,
-            offset_blocks=public_block_count,
-        )
+        # Get CIDR masks from resolved subnets
+        public_cidr_mask = self._get_cidr_mask(vpc_config.public_subnets[0].cidr_block)
+        private_cidr_mask = self._get_cidr_mask(vpc_config.private_subnets[0].cidr_block)
 
         # Build subnet specs for awsx VPC
         subnet_specs = [
             awsx.ec2.SubnetSpecArgs(
                 type=awsx.ec2.SubnetType.PUBLIC,
-                cidr_mask=self._get_cidr_mask(public_subnets[0].cidr_block) if public_subnets else 24,
+                cidr_mask=public_cidr_mask,
                 tags={
                     "kubernetes.io/role/elb": "1",
                     "karpenter.sh/discovery": name,
@@ -101,7 +60,7 @@ class Networking(pulumi.ComponentResource):
             ),
             awsx.ec2.SubnetSpecArgs(
                 type=awsx.ec2.SubnetType.PRIVATE,
-                cidr_mask=self._get_cidr_mask(private_subnets[0].cidr_block) if private_subnets else 20,
+                cidr_mask=private_cidr_mask,
                 tags={
                     "kubernetes.io/role/internal-elb": "1",
                     "karpenter.sh/discovery": name,
@@ -134,7 +93,9 @@ class Networking(pulumi.ComponentResource):
 
         # Get route table IDs from AWSX VPC for later use
         self._private_route_table_ids = self.vpc.route_tables.apply(
-            lambda rts: [rt.id for rt in rts if rt.tags.get("Name", "").find("private") != -1] if rts else []
+            lambda rts: [rt.id for rt in rts if rt.tags.get("Name", "").find("private") != -1]
+            if rts
+            else []
         )
 
         # Add secondary CIDR blocks if specified
@@ -148,12 +109,11 @@ class Networking(pulumi.ComponentResource):
             )
             self.secondary_cidr_associations.append(association)
 
-        # Create pod subnets if enabled
+        # Create pod subnets if configured
         self.pod_subnet_ids: list[pulumi.Output[str]] = []
-        if vpc_config.pod_subnets and vpc_config.pod_subnets.enabled:
+        if vpc_config.pod_subnets:
             self.pod_subnet_ids = self._create_pod_subnets(
                 vpc_config.pod_subnets,
-                vpc_config.secondary_cidr_blocks,
                 vpc_config.nat_gateway_strategy,
                 child_opts,
             )
@@ -170,50 +130,18 @@ class Networking(pulumi.ComponentResource):
             }
         )
 
-    def _resolve_subnet_config(
-        self,
-        vpc_cidr: str,
-        subnet_group: SubnetGroupConfig | None,
-        default_mask: int,
-        offset_blocks: int,
-    ) -> list[SubnetConfig]:
-        """Resolve subnet configuration to actual subnet configs."""
-        if subnet_group and subnet_group.custom_subnets:
-            return subnet_group.custom_subnets
-
-        cidr_mask = subnet_group.cidr_mask if subnet_group else default_mask
-        return _calculate_subnet_cidrs(
-            vpc_cidr,
-            self._availability_zones,
-            cidr_mask or default_mask,
-            offset_blocks,
-        )
-
     def _get_cidr_mask(self, cidr: str) -> int:
         """Extract CIDR mask from CIDR string."""
         return int(cidr.split("/")[1])
 
     def _create_pod_subnets(
         self,
-        pod_config: PodSubnetConfig,
-        secondary_cidrs: list[str],
+        pod_subnets: list[SubnetResolved],
         nat_strategy: NatGatewayStrategy,
         opts: pulumi.ResourceOptions,
     ) -> list[pulumi.Output[str]]:
         """Create pod subnets for custom networking with proper routing."""
         pod_subnet_ids = []
-
-        if pod_config.custom_subnets:
-            pod_subnets = pod_config.custom_subnets
-        elif secondary_cidrs:
-            pod_subnets = _calculate_subnet_cidrs(
-                secondary_cidrs[0],
-                self._availability_zones,
-                pod_config.cidr_mask or 18,
-                offset_blocks=0,
-            )
-        else:
-            return []
 
         # Create route table for pod subnets
         pod_route_table = aws.ec2.RouteTable(
@@ -252,9 +180,11 @@ class Networking(pulumi.ComponentResource):
         # Create pod subnets
         for i, subnet_config in enumerate(pod_subnets):
             az = subnet_config.availability_zone
-            subnet_name = subnet_config.name or f"{self._name}-pod-{az[-1]}"
+            subnet_name = subnet_config.name
 
-            depends_on = self.secondary_cidr_associations if self.secondary_cidr_associations else []
+            depends_on = (
+                self.secondary_cidr_associations if self.secondary_cidr_associations else []
+            )
 
             subnet = aws.ec2.Subnet(
                 f"{self._name}-pod-subnet-{i}",
@@ -268,6 +198,7 @@ class Networking(pulumi.ComponentResource):
                     "kubernetes.io/role/internal-elb": "1",
                     "karpenter.sh/discovery": self._name,
                     **self._tags,
+                    **subnet_config.tags,
                 },
                 opts=pulumi.ResourceOptions(
                     parent=self,
@@ -293,21 +224,27 @@ class Networking(pulumi.ComponentResource):
 
     def _create_vpc_endpoints(
         self,
-        endpoints_config: VpcEndpointsConfig,
+        endpoints_config: VpcEndpointsResolved,
         opts: pulumi.ResourceOptions,
     ) -> None:
         """Create VPC endpoints based on configuration."""
         # Create security group for interface endpoints
-        if any([
-            endpoints_config.ecr_api,
-            endpoints_config.ecr_dkr,
-            endpoints_config.sts,
-            endpoints_config.logs,
-            endpoints_config.ec2,
-            endpoints_config.ssm,
-            endpoints_config.ssmmessages,
-            endpoints_config.ec2messages,
-        ]):
+        has_interface_endpoints = any(
+            [
+                endpoints_config.ecr_api,
+                endpoints_config.ecr_dkr,
+                endpoints_config.sts,
+                endpoints_config.logs,
+                endpoints_config.ec2,
+                endpoints_config.ssm,
+                endpoints_config.ssmmessages,
+                endpoints_config.ec2messages,
+                endpoints_config.elasticloadbalancing,
+                endpoints_config.autoscaling,
+            ]
+        )
+
+        if has_interface_endpoints:
             self.endpoint_sg = aws.ec2.SecurityGroup(
                 f"{self._name}-vpc-endpoints-sg",
                 vpc_id=self.vpc_id,
@@ -336,9 +273,8 @@ class Networking(pulumi.ComponentResource):
                 opts=opts,
             )
 
-        # S3 Gateway Endpoint - with route table association
-        if endpoints_config.s3_gateway:
-            # Get all route table IDs
+        # S3 Gateway Endpoint
+        if endpoints_config.s3:
             route_table_ids = self.vpc.route_tables.apply(
                 lambda rts: [rt.id for rt in rts] if rts else []
             )
@@ -356,6 +292,25 @@ class Networking(pulumi.ComponentResource):
                 opts=opts,
             )
 
+        # DynamoDB Gateway Endpoint
+        if endpoints_config.dynamodb:
+            route_table_ids = self.vpc.route_tables.apply(
+                lambda rts: [rt.id for rt in rts] if rts else []
+            )
+
+            aws.ec2.VpcEndpoint(
+                f"{self._name}-dynamodb-endpoint",
+                vpc_id=self.vpc_id,
+                service_name=f"com.amazonaws.{self._get_region()}.dynamodb",
+                vpc_endpoint_type="Gateway",
+                route_table_ids=route_table_ids,
+                tags={
+                    "Name": f"{self._name}-dynamodb-endpoint",
+                    **self._tags,
+                },
+                opts=opts,
+            )
+
         # Interface endpoints
         interface_endpoints = {
             "ecr.api": endpoints_config.ecr_api,
@@ -366,6 +321,8 @@ class Networking(pulumi.ComponentResource):
             "ssm": endpoints_config.ssm,
             "ssmmessages": endpoints_config.ssmmessages,
             "ec2messages": endpoints_config.ec2messages,
+            "elasticloadbalancing": endpoints_config.elasticloadbalancing,
+            "autoscaling": endpoints_config.autoscaling,
         }
 
         for service_suffix, enabled in interface_endpoints.items():

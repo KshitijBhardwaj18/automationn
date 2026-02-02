@@ -1,11 +1,26 @@
-"""Pydantic models for API requests and responses."""
+"""Pydantic models for API requests and responses.
+
+This module defines:
+1. Input models (partial configs from API requests)
+2. Resolved models (fully-expanded configs with all defaults filled)
+3. Response models (what we return to API clients)
+
+Design Philosophy:
+- Sensible defaults follow "simplest secure thing AWS does by default"
+- Mandatory components are always present in resolved configs
+- Input models are permissive; resolved models are complete
+"""
 
 import ipaddress
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
+
+# =============================================================================
+# Enums
+# =============================================================================
 
 
 class DeploymentStatus(str, Enum):
@@ -22,8 +37,8 @@ class DeploymentStatus(str, Enum):
 class EksMode(str, Enum):
     """EKS compute mode."""
 
-    AUTO = "auto"
-    MANAGED = "managed"
+    AUTO = "auto"  # EKS Auto Mode - AWS manages compute, storage, networking
+    MANAGED = "managed"  # Traditional managed node groups
 
 
 class NatGatewayStrategy(str, Enum):
@@ -31,7 +46,7 @@ class NatGatewayStrategy(str, Enum):
 
     NONE = "none"  # No NAT gateway (public subnets only)
     SINGLE = "single"  # Single NAT gateway for all AZs (~$32/mo)
-    ONE_PER_AZ = "one_per_az"  # One NAT gateway per AZ (~$96/mo for 3 AZs)
+    ONE_PER_AZ = "one_per_az"  # One NAT gateway per AZ (HA, ~$96/mo for 3 AZs)
 
 
 class EndpointAccess(str, Enum):
@@ -42,31 +57,74 @@ class EndpointAccess(str, Enum):
     PUBLIC_AND_PRIVATE = "public_and_private"  # Both public and private access
 
 
-# -----------------------------------------------------------------------------
-# Subnet Configuration Models
-# -----------------------------------------------------------------------------
+class CapacityType(str, Enum):
+    """EC2 capacity type for node groups."""
+
+    ON_DEMAND = "ON_DEMAND"
+    SPOT = "SPOT"
 
 
-class SubnetConfig(BaseModel):
-    """Configuration for a single subnet."""
+class AmiType(str, Enum):
+    """AMI type for EKS nodes."""
 
-    cidr_block: str = Field(
+    AL2_X86_64 = "AL2_x86_64"
+    AL2_X86_64_GPU = "AL2_x86_64_GPU"
+    AL2_ARM_64 = "AL2_ARM_64"
+    AL2023_X86_64_STANDARD = "AL2023_x86_64_STANDARD"
+    AL2023_ARM_64_STANDARD = "AL2023_ARM_64_STANDARD"
+    BOTTLEROCKET_X86_64 = "BOTTLEROCKET_x86_64"
+    BOTTLEROCKET_ARM_64 = "BOTTLEROCKET_ARM_64"
+
+
+# =============================================================================
+# AWS Configuration
+# =============================================================================
+
+
+class AwsConfigInput(BaseModel):
+    """AWS account configuration - required fields for cross-account access."""
+
+    role_arn: str = Field(
         ...,
-        description="CIDR block for the subnet (e.g., '10.0.0.0/24')",
+        description="IAM role ARN for cross-account access",
+        pattern=r"^arn:aws:iam::\d{12}:role/.+$",
     )
-    availability_zone: str = Field(
+    external_id: str = Field(
         ...,
-        description="Availability zone for the subnet (e.g., 'us-east-1a')",
+        description="External ID for secure role assumption",
+        min_length=10,
     )
-    name: Optional[str] = Field(
-        default=None,
-        description="Optional name for the subnet",
+    region: str = Field(
+        default="us-east-1",
+        description="AWS region for deployment",
     )
+
+
+class AwsConfigResolved(BaseModel):
+    """Fully resolved AWS configuration."""
+
+    role_arn: str
+    external_id: str
+    region: str
+    availability_zones: list[str]  # Always 3 AZs, computed from region
+
+
+# =============================================================================
+# Subnet Configuration
+# =============================================================================
+
+
+class SubnetInput(BaseModel):
+    """Input for a single subnet - user can specify custom subnets."""
+
+    cidr_block: str = Field(..., description="CIDR block for the subnet")
+    availability_zone: str = Field(..., description="Availability zone")
+    name: Optional[str] = Field(default=None, description="Optional subnet name")
+    tags: dict[str, str] = Field(default_factory=dict, description="Additional tags")
 
     @field_validator("cidr_block")
     @classmethod
     def validate_cidr(cls, v: str) -> str:
-        """Validate CIDR format."""
         try:
             ipaddress.ip_network(v, strict=False)
         except ValueError as e:
@@ -74,95 +132,64 @@ class SubnetConfig(BaseModel):
         return v
 
 
-class SubnetGroupConfig(BaseModel):
-    """Configuration for a group of subnets (public, private, or pod)."""
+class SubnetResolved(BaseModel):
+    """Fully resolved subnet configuration."""
 
-    cidr_mask: Optional[int] = Field(
-        default=None,
-        ge=16,
-        le=28,
-        description="CIDR mask for auto-calculated subnets",
-    )
-    custom_subnets: Optional[list[SubnetConfig]] = Field(
-        default=None,
-        description="Custom subnet configurations (overrides cidr_mask)",
-    )
-
-    @model_validator(mode="after")
-    def validate_subnet_config(self) -> "SubnetGroupConfig":
-        """Ensure either cidr_mask or custom_subnets is provided."""
-        if self.cidr_mask is None and self.custom_subnets is None:
-            raise ValueError("Either cidr_mask or custom_subnets must be provided")
-        return self
+    cidr_block: str
+    availability_zone: str
+    name: str  # Always has a name in resolved config
+    tags: dict[str, str]
 
 
-class PodSubnetConfig(BaseModel):
-    """Configuration for pod subnets (custom networking)."""
-
-    enabled: bool = Field(
-        default=False,
-        description="Enable pod subnets for custom networking",
-    )
-    cidr_mask: Optional[int] = Field(
-        default=18,
-        ge=16,
-        le=28,
-        description="CIDR mask for auto-calculated pod subnets",
-    )
-    custom_subnets: Optional[list[SubnetConfig]] = Field(
-        default=None,
-        description="Custom pod subnet configurations",
-    )
+# =============================================================================
+# VPC Endpoints Configuration
+# =============================================================================
 
 
-# -----------------------------------------------------------------------------
-# VPC Configuration Models
-# -----------------------------------------------------------------------------
+class VpcEndpointsInput(BaseModel):
+    """VPC endpoints configuration - all optional with sensible defaults."""
+
+    # Gateway endpoints (free)
+    s3: bool = Field(default=True, description="Enable S3 gateway endpoint")
+    dynamodb: bool = Field(default=False, description="Enable DynamoDB gateway endpoint")
+
+    # Interface endpoints (cost ~$7.50/mo each + data transfer)
+    ecr_api: bool = Field(default=False, description="Enable ECR API endpoint")
+    ecr_dkr: bool = Field(default=False, description="Enable ECR DKR endpoint")
+    sts: bool = Field(default=False, description="Enable STS endpoint")
+    logs: bool = Field(default=False, description="Enable CloudWatch Logs endpoint")
+    ec2: bool = Field(default=False, description="Enable EC2 endpoint")
+    ssm: bool = Field(default=False, description="Enable SSM endpoint")
+    ssmmessages: bool = Field(default=False, description="Enable SSM Messages endpoint")
+    ec2messages: bool = Field(default=False, description="Enable EC2 Messages endpoint")
+    elasticloadbalancing: bool = Field(default=False, description="Enable ELB endpoint")
+    autoscaling: bool = Field(default=False, description="Enable Auto Scaling endpoint")
 
 
-class VpcEndpointsConfig(BaseModel):
-    """Configuration for VPC endpoints."""
+class VpcEndpointsResolved(BaseModel):
+    """Fully resolved VPC endpoints configuration."""
 
-    s3_gateway: bool = Field(
-        default=True,
-        description="Enable S3 gateway endpoint",
-    )
-    ecr_api: bool = Field(
-        default=False,
-        description="Enable ECR API interface endpoint",
-    )
-    ecr_dkr: bool = Field(
-        default=False,
-        description="Enable ECR DKR interface endpoint",
-    )
-    sts: bool = Field(
-        default=False,
-        description="Enable STS interface endpoint",
-    )
-    logs: bool = Field(
-        default=False,
-        description="Enable CloudWatch Logs interface endpoint",
-    )
-    ec2: bool = Field(
-        default=False,
-        description="Enable EC2 interface endpoint",
-    )
-    ssm: bool = Field(
-        default=False,
-        description="Enable SSM interface endpoint",
-    )
-    ssmmessages: bool = Field(
-        default=False,
-        description="Enable SSM Messages interface endpoint",
-    )
-    ec2messages: bool = Field(
-        default=False,
-        description="Enable EC2 Messages interface endpoint",
-    )
+    s3: bool
+    dynamodb: bool
+    ecr_api: bool
+    ecr_dkr: bool
+    sts: bool
+    logs: bool
+    ec2: bool
+    ssm: bool
+    ssmmessages: bool
+    ec2messages: bool
+    elasticloadbalancing: bool
+    autoscaling: bool
 
 
-class VpcConfig(BaseModel):
-    """VPC configuration options."""
+# =============================================================================
+# VPC Configuration
+# =============================================================================
+
+
+class VpcConfigInput(BaseModel):
+    """VPC configuration input - minimal required, rest uses defaults."""
 
     cidr_block: str = Field(
         default="10.0.0.0/16",
@@ -170,41 +197,42 @@ class VpcConfig(BaseModel):
     )
     secondary_cidr_blocks: list[str] = Field(
         default_factory=list,
-        description="Secondary CIDR blocks for the VPC (e.g., for pod subnets)",
+        description="Secondary CIDR blocks (e.g., for pod subnets)",
     )
     nat_gateway_strategy: NatGatewayStrategy = Field(
-        default=NatGatewayStrategy.ONE_PER_AZ,
-        description="NAT gateway deployment strategy",
+        default=NatGatewayStrategy.SINGLE,
+        description="NAT gateway strategy - single is cost-effective default",
     )
-    public_subnets: Optional[SubnetGroupConfig] = Field(
+
+    # Optional custom subnets - if not provided, auto-calculated
+    public_subnets: Optional[list[SubnetInput]] = Field(
         default=None,
-        description="Public subnet configuration",
+        description="Custom public subnet configs (auto-calculated if not provided)",
     )
-    private_subnets: Optional[SubnetGroupConfig] = Field(
+    private_subnets: Optional[list[SubnetInput]] = Field(
         default=None,
-        description="Private subnet configuration",
+        description="Custom private subnet configs (auto-calculated if not provided)",
     )
-    pod_subnets: Optional[PodSubnetConfig] = Field(
+    pod_subnets: Optional[list[SubnetInput]] = Field(
         default=None,
-        description="Pod subnet configuration for custom networking",
+        description="Custom pod subnet configs (requires secondary CIDR)",
     )
-    vpc_endpoints: VpcEndpointsConfig = Field(
-        default_factory=VpcEndpointsConfig,
+
+    # VPC endpoints
+    vpc_endpoints: Optional[VpcEndpointsInput] = Field(
+        default=None,
         description="VPC endpoints configuration",
     )
-    enable_dns_hostnames: bool = Field(
-        default=True,
-        description="Enable DNS hostnames in VPC (required for EKS)",
-    )
-    enable_dns_support: bool = Field(
-        default=True,
-        description="Enable DNS support in VPC (required for EKS)",
-    )
+
+    # DNS settings - AWS defaults
+    enable_dns_hostnames: bool = Field(default=True)
+    enable_dns_support: bool = Field(default=True)
+
+    tags: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("cidr_block")
     @classmethod
     def validate_vpc_cidr(cls, v: str) -> str:
-        """Validate VPC CIDR format."""
         try:
             network = ipaddress.ip_network(v, strict=False)
             if network.prefixlen < 16 or network.prefixlen > 24:
@@ -213,136 +241,226 @@ class VpcConfig(BaseModel):
             raise ValueError(f"Invalid VPC CIDR: {e}") from e
         return v
 
-    @field_validator("secondary_cidr_blocks")
-    @classmethod
-    def validate_secondary_cidrs(cls, v: list[str]) -> list[str]:
-        """Validate secondary CIDR blocks."""
-        for cidr in v:
-            try:
-                ipaddress.ip_network(cidr, strict=False)
-            except ValueError as e:
-                raise ValueError(f"Invalid secondary CIDR block '{cidr}': {e}") from e
-        return v
+
+class VpcConfigResolved(BaseModel):
+    """Fully resolved VPC configuration - all fields populated."""
+
+    cidr_block: str
+    secondary_cidr_blocks: list[str]
+    nat_gateway_strategy: NatGatewayStrategy
+
+    public_subnets: list[SubnetResolved]
+    private_subnets: list[SubnetResolved]
+    pod_subnets: list[SubnetResolved]  # Empty list if not enabled
+
+    vpc_endpoints: VpcEndpointsResolved
+
+    enable_dns_hostnames: bool
+    enable_dns_support: bool
+
+    tags: dict[str, str]
 
 
-# -----------------------------------------------------------------------------
-# EKS Access Configuration Models
-# -----------------------------------------------------------------------------
+# =============================================================================
+# EKS Access Configuration
+# =============================================================================
 
 
-class AccessEntryConfig(BaseModel):
-    """Configuration for an EKS access entry."""
+class AccessEntryInput(BaseModel):
+    """EKS access entry for IAM principal."""
 
     principal_arn: str = Field(
         ...,
-        description="IAM principal ARN to grant access",
+        description="IAM principal ARN",
         pattern=r"^arn:aws:iam::\d{12}:(role|user)/.+$",
     )
-    policy: str = Field(
-        default="AmazonEKSClusterAdminPolicy",
-        description="EKS access policy name",
-    )
-    access_scope: str = Field(
-        default="cluster",
-        description="Access scope: 'cluster' or 'namespace'",
-        pattern=r"^(cluster|namespace)$",
-    )
-    namespaces: list[str] = Field(
+    type: str = Field(default="STANDARD", description="Access entry type")
+    policy_associations: list[dict] = Field(
         default_factory=list,
-        description="Namespaces for namespace-scoped access",
+        description="Policy associations for this principal",
     )
 
 
-class EksAccessConfig(BaseModel):
-    """EKS cluster access configuration."""
+class EksAccessInput(BaseModel):
+    """EKS access configuration input."""
 
-    endpoint_access: EndpointAccess = Field(
-        default=EndpointAccess.PRIVATE,
-        description="Cluster endpoint access type",
+    endpoint_private_access: bool = Field(
+        default=True,
+        description="Enable private endpoint access",
+    )
+    endpoint_public_access: bool = Field(
+        default=False,
+        description="Enable public endpoint access",
     )
     public_access_cidrs: list[str] = Field(
         default_factory=list,
-        description="CIDRs allowed for public endpoint access",
-    )
-    grant_admin_to_creator: bool = Field(
-        default=True,
-        description="Grant cluster admin to the role that creates the cluster",
+        description="CIDRs allowed for public access",
     )
     authentication_mode: str = Field(
         default="API_AND_CONFIG_MAP",
-        description="Authentication mode: API, CONFIG_MAP, or API_AND_CONFIG_MAP",
-        pattern=r"^(API|CONFIG_MAP|API_AND_CONFIG_MAP)$",
+        description="Authentication mode",
     )
-    access_entries: list[AccessEntryConfig] = Field(
+    bootstrap_cluster_creator_admin_permissions: bool = Field(
+        default=True,
+        description="Grant admin to cluster creator",
+    )
+    access_entries: list[AccessEntryInput] = Field(
         default_factory=list,
-        description="Additional access entries for IAM principals",
+        description="Additional access entries",
     )
 
-    @field_validator("public_access_cidrs")
-    @classmethod
-    def validate_public_cidrs(cls, v: list[str]) -> list[str]:
-        """Validate public access CIDRs."""
-        for cidr in v:
-            try:
-                ipaddress.ip_network(cidr, strict=False)
-            except ValueError as e:
-                raise ValueError(f"Invalid public access CIDR '{cidr}': {e}") from e
-        return v
+
+class EksAccessResolved(BaseModel):
+    """Fully resolved EKS access configuration."""
+
+    endpoint_private_access: bool
+    endpoint_public_access: bool
+    public_access_cidrs: list[str]
+    authentication_mode: str
+    bootstrap_cluster_creator_admin_permissions: bool
+    access_entries: list[AccessEntryInput]
 
 
-# -----------------------------------------------------------------------------
-# EKS Configuration Models
-# -----------------------------------------------------------------------------
+# =============================================================================
+# EKS Addon Configuration
+# =============================================================================
 
 
-class EksConfig(BaseModel):
-    """EKS cluster configuration options."""
+class AddonConfigInput(BaseModel):
+    """Configuration for a single EKS addon."""
 
-    version: str = Field(
-        default="1.31",
-        description="Kubernetes version",
+    enabled: bool = Field(default=True)
+    version: Optional[str] = Field(
+        default=None,
+        description="Addon version (None = latest)",
     )
+    service_account_role_arn: Optional[str] = Field(default=None)
+    configuration: dict = Field(default_factory=dict)
+    resolve_conflicts_on_create: str = Field(default="OVERWRITE")
+    resolve_conflicts_on_update: str = Field(default="PRESERVE")
+
+
+class EksAddonsInput(BaseModel):
+    """EKS addons configuration - platform defaults applied."""
+
+    # Core addons (always enabled for managed mode)
+    vpc_cni: Optional[AddonConfigInput] = None
+    coredns: Optional[AddonConfigInput] = None
+    kube_proxy: Optional[AddonConfigInput] = None
+
+    # Storage addons
+    ebs_csi_driver: Optional[AddonConfigInput] = None
+    efs_csi_driver: Optional[AddonConfigInput] = None
+
+    # Other addons
+    pod_identity_agent: Optional[AddonConfigInput] = None
+    snapshot_controller: Optional[AddonConfigInput] = None
+
+
+class EksAddonsResolved(BaseModel):
+    """Fully resolved EKS addons configuration."""
+
+    vpc_cni: AddonConfigInput
+    coredns: AddonConfigInput
+    kube_proxy: AddonConfigInput
+    ebs_csi_driver: AddonConfigInput
+    efs_csi_driver: AddonConfigInput
+    pod_identity_agent: AddonConfigInput
+    snapshot_controller: AddonConfigInput
+
+
+# =============================================================================
+# Node Group Configuration
+# =============================================================================
+
+
+class NodeGroupScalingInput(BaseModel):
+    """Node group scaling configuration."""
+
+    desired_size: int = Field(default=2, ge=0, le=100)
+    min_size: int = Field(default=1, ge=0, le=100)
+    max_size: int = Field(default=5, ge=1, le=100)
+
+
+class NodeGroupInput(BaseModel):
+    """Node group configuration input."""
+
+    name: str = Field(default="general")
+    instance_types: list[str] = Field(default_factory=lambda: ["t3.medium"])
+    capacity_type: CapacityType = Field(default=CapacityType.ON_DEMAND)
+    ami_type: AmiType = Field(default=AmiType.AL2023_X86_64_STANDARD)
+    disk_size: int = Field(default=50, ge=20, le=1000)
+    scaling: Optional[NodeGroupScalingInput] = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    taints: list[dict[str, str]] = Field(default_factory=list)
+    tags: dict[str, str] = Field(default_factory=dict)
+
+
+class NodeGroupResolved(BaseModel):
+    """Fully resolved node group configuration."""
+
+    name: str
+    instance_types: list[str]
+    capacity_type: CapacityType
+    ami_type: AmiType
+    disk_size: int
+    desired_size: int
+    min_size: int
+    max_size: int
+    labels: dict[str, str]
+    taints: list[dict[str, str]]
+    tags: dict[str, str]
+
+
+# =============================================================================
+# EKS Configuration
+# =============================================================================
+
+
+class EksConfigInput(BaseModel):
+    """EKS cluster configuration input."""
+
+    version: str = Field(default="1.31", description="Kubernetes version")
     mode: EksMode = Field(
-        default=EksMode.MANAGED,
-        description="EKS compute mode: 'auto' or 'managed'",
+        default=EksMode.AUTO,
+        description="EKS mode: auto (AWS manages everything) or managed (node groups)",
     )
     service_ipv4_cidr: str = Field(
         default="172.20.0.0/16",
-        description="Kubernetes service CIDR (must not overlap with VPC CIDR)",
+        description="Kubernetes service CIDR",
     )
-    access: EksAccessConfig = Field(
-        default_factory=EksAccessConfig,
-        description="Cluster access configuration",
-    )
-    logging_enabled: bool = Field(
-        default=False,
-        description="Enable control plane logging",
-    )
+
+    # Access configuration
+    access: Optional[EksAccessInput] = None
+
+    # Logging - disabled by default (cost consideration)
+    logging_enabled: bool = Field(default=False)
     logging_types: list[str] = Field(
-        default=["api", "audit", "authenticator", "controllerManager", "scheduler"],
-        description="Control plane log types to enable",
+        default_factory=lambda: ["api", "audit", "authenticator"],
     )
-    encryption_enabled: bool = Field(
-        default=False,
-        description="Enable secrets encryption",
-    )
+
+    # Encryption - enabled by default (AWS managed key)
+    encryption_enabled: bool = Field(default=True)
     encryption_kms_key_arn: Optional[str] = Field(
         default=None,
-        description="KMS key ARN for secrets encryption",
+        description="KMS key ARN (None = AWS creates one)",
     )
-    deletion_protection: bool = Field(
-        default=False,
-        description="Enable deletion protection",
-    )
-    zonal_shift_enabled: bool = Field(
-        default=False,
-        description="Enable ARC zonal shift",
-    )
+
+    # Other settings
+    zonal_shift_enabled: bool = Field(default=False)
+    deletion_protection: bool = Field(default=False)
+
+    # Addons
+    addons: Optional[EksAddonsInput] = None
+
+    # Node groups (only for managed mode)
+    node_groups: Optional[list[NodeGroupInput]] = None
+
+    tags: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("service_ipv4_cidr")
     @classmethod
     def validate_service_cidr(cls, v: str) -> str:
-        """Validate service CIDR format."""
         try:
             network = ipaddress.ip_network(v, strict=False)
             if network.prefixlen < 12 or network.prefixlen > 24:
@@ -352,72 +470,42 @@ class EksConfig(BaseModel):
         return v
 
 
-# -----------------------------------------------------------------------------
-# Node Group Configuration Models
-# -----------------------------------------------------------------------------
+class EksConfigResolved(BaseModel):
+    """Fully resolved EKS configuration."""
+
+    version: str
+    mode: EksMode
+    service_ipv4_cidr: str
+
+    access: EksAccessResolved
+
+    logging_enabled: bool
+    logging_types: list[str]
+
+    encryption_enabled: bool
+    encryption_kms_key_arn: Optional[str]
+
+    zonal_shift_enabled: bool
+    deletion_protection: bool
+
+    addons: EksAddonsResolved
+
+    # Node groups - empty for auto mode, populated for managed mode
+    node_groups: list[NodeGroupResolved]
+
+    tags: dict[str, str]
 
 
-class NodeGroupConfig(BaseModel):
-    """Configuration for managed node group (only used when eks_mode=managed)."""
-
-    name: str = Field(
-        default="general",
-        description="Node group name",
-    )
-    instance_types: list[str] = Field(
-        default=["t3.medium"],
-        description="EC2 instance types for worker nodes",
-    )
-    desired_size: int = Field(
-        default=2,
-        description="Desired number of nodes",
-        ge=0,
-        le=100,
-    )
-    min_size: int = Field(
-        default=1,
-        description="Minimum number of nodes",
-        ge=0,
-        le=100,
-    )
-    max_size: int = Field(
-        default=5,
-        description="Maximum number of nodes",
-        ge=1,
-        le=100,
-    )
-    disk_size: int = Field(
-        default=50,
-        description="Disk size in GB for each node",
-        ge=20,
-        le=1000,
-    )
-    capacity_type: str = Field(
-        default="ON_DEMAND",
-        description="Capacity type: ON_DEMAND or SPOT",
-        pattern=r"^(ON_DEMAND|SPOT)$",
-    )
-    ami_type: str = Field(
-        default="AL2_x86_64",
-        description="AMI type for nodes",
-    )
-    labels: dict[str, str] = Field(
-        default_factory=dict,
-        description="Kubernetes labels for nodes",
-    )
-    taints: list[dict[str, str]] = Field(
-        default_factory=list,
-        description="Kubernetes taints for nodes",
-    )
+# =============================================================================
+# Main Configuration Models
+# =============================================================================
 
 
-# -----------------------------------------------------------------------------
-# Main Customer Configuration Models
-# -----------------------------------------------------------------------------
+class CustomerConfigInput(BaseModel):
+    """Input model for creating/updating customer configuration.
 
-
-class CustomerConfigCreate(BaseModel):
-    """Request model for creating a customer configuration."""
+    This is what the API accepts - partial config with sensible defaults.
+    """
 
     customer_id: str = Field(
         ...,
@@ -426,332 +514,66 @@ class CustomerConfigCreate(BaseModel):
         min_length=3,
         max_length=50,
     )
-    role_arn: str = Field(
-        ...,
-        description="Customer's IAM role ARN for cross-account access",
-        pattern=r"^arn:aws:iam::\d{12}:role/.+$",
-    )
-    external_id: str = Field(
-        ...,
-        description="External ID for secure role assumption",
-        min_length=10,
-    )
-    aws_region: str = Field(
-        default="us-east-1",
-        description="AWS region for deployment",
-    )
-    availability_zones: Optional[list[str]] = Field(
-        default=None,
-        description="Availability zones (defaults to 3 AZs in the region)",
+    environment: str = Field(
+        default="prod",
+        description="Environment name",
+        pattern=r"^[a-z0-9-]+$",
     )
 
-    # VPC Configuration
-    vpc_config: VpcConfig = Field(
-        default_factory=VpcConfig,
-        description="VPC configuration",
-    )
+    # AWS configuration - required
+    aws_config: AwsConfigInput
 
-    # EKS Configuration
-    eks_config: EksConfig = Field(
-        default_factory=EksConfig,
-        description="EKS cluster configuration",
-    )
+    # VPC configuration - optional, uses defaults
+    vpc_config: Optional[VpcConfigInput] = None
 
-    # Node Group Configuration (for managed mode)
-    node_group_config: Optional[NodeGroupConfig] = Field(
-        default=None,
-        description="Node group configuration (only used when eks_mode=managed)",
-    )
+    # EKS configuration - optional, uses defaults
+    eks_config: Optional[EksConfigInput] = None
 
-    # Tags
-    tags: dict[str, str] = Field(
-        default_factory=dict,
-        description="Custom tags to apply to all resources",
-    )
-
-    @field_validator("aws_region")
-    @classmethod
-    def validate_aws_region(cls, v: str) -> str:
-        """Validate AWS region format."""
-        valid_regions = [
-            "us-east-1",
-            "us-east-2",
-            "us-west-1",
-            "us-west-2",
-            "eu-west-1",
-            "eu-west-2",
-            "eu-west-3",
-            "eu-central-1",
-            "eu-north-1",
-            "ap-south-1",
-            "ap-southeast-1",
-            "ap-southeast-2",
-            "ap-northeast-1",
-            "ap-northeast-2",
-            "ap-northeast-3",
-            "sa-east-1",
-            "ca-central-1",
-        ]
-        if v not in valid_regions:
-            raise ValueError(f"Invalid AWS region. Must be one of: {valid_regions}")
-        return v
-
-    @model_validator(mode="after")
-    def validate_cidr_no_overlap(self) -> "CustomerConfigCreate":
-        """Validate that service CIDR doesn't overlap with VPC CIDR."""
-        vpc_network = ipaddress.ip_network(self.vpc_config.cidr_block, strict=False)
-        service_network = ipaddress.ip_network(
-            self.eks_config.service_ipv4_cidr, strict=False
-        )
-
-        if vpc_network.overlaps(service_network):
-            raise ValueError(
-                f"Service CIDR {self.eks_config.service_ipv4_cidr} overlaps with "
-                f"VPC CIDR {self.vpc_config.cidr_block}. Use a different service CIDR."
-            )
-
-        # Validate secondary CIDRs don't overlap with primary
-        for secondary in self.vpc_config.secondary_cidr_blocks:
-            secondary_network = ipaddress.ip_network(secondary, strict=False)
-            if vpc_network.overlaps(secondary_network):
-                raise ValueError(
-                    f"Secondary CIDR {secondary} overlaps with primary VPC CIDR "
-                    f"{self.vpc_config.cidr_block}"
-                )
-
-        return self
-
-    @model_validator(mode="after")
-    def validate_pod_subnets_require_secondary_cidr(self) -> "CustomerConfigCreate":
-        """Validate that pod subnets have a secondary CIDR if enabled."""
-        if (
-            self.vpc_config.pod_subnets
-            and self.vpc_config.pod_subnets.enabled
-            and not self.vpc_config.secondary_cidr_blocks
-            and not self.vpc_config.pod_subnets.custom_subnets
-        ):
-            raise ValueError(
-                "Pod subnets require either secondary_cidr_blocks or custom_subnets "
-                "to be configured"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_custom_subnets_match_azs(self) -> "CustomerConfigCreate":
-        """Validate custom subnets match availability zones."""
-        if not self.availability_zones:
-            return self
-
-        azs = set(self.availability_zones)
-
-        # Check public subnets
-        if (
-            self.vpc_config.public_subnets
-            and self.vpc_config.public_subnets.custom_subnets
-        ):
-            subnet_azs = {s.availability_zone for s in self.vpc_config.public_subnets.custom_subnets}
-            if not subnet_azs.issubset(azs):
-                invalid = subnet_azs - azs
-                raise ValueError(
-                    f"Public subnet AZs {invalid} not in availability_zones {azs}"
-                )
-
-        # Check private subnets
-        if (
-            self.vpc_config.private_subnets
-            and self.vpc_config.private_subnets.custom_subnets
-        ):
-            subnet_azs = {s.availability_zone for s in self.vpc_config.private_subnets.custom_subnets}
-            if not subnet_azs.issubset(azs):
-                invalid = subnet_azs - azs
-                raise ValueError(
-                    f"Private subnet AZs {invalid} not in availability_zones {azs}"
-                )
-
-        # Check pod subnets
-        if (
-            self.vpc_config.pod_subnets
-            and self.vpc_config.pod_subnets.enabled
-            and self.vpc_config.pod_subnets.custom_subnets
-        ):
-            subnet_azs = {s.availability_zone for s in self.vpc_config.pod_subnets.custom_subnets}
-            if not subnet_azs.issubset(azs):
-                invalid = subnet_azs - azs
-                raise ValueError(
-                    f"Pod subnet AZs {invalid} not in availability_zones {azs}"
-                )
-
-        return self
+    # Global tags applied to all resources
+    tags: dict[str, str] = Field(default_factory=dict)
 
 
-class CustomerConfigUpdate(BaseModel):
-    """Request model for updating a customer configuration."""
+class CustomerConfigResolved(BaseModel):
+    """Fully resolved customer configuration.
 
-    role_arn: Optional[str] = Field(
-        default=None,
-        description="Customer's IAM role ARN for cross-account access",
-        pattern=r"^arn:aws:iam::\d{12}:role/.+$",
-    )
-    external_id: Optional[str] = Field(
-        default=None,
-        description="External ID for secure role assumption",
-        min_length=10,
-    )
-    aws_region: Optional[str] = Field(
-        default=None,
-        description="AWS region for deployment",
-    )
-    availability_zones: Optional[list[str]] = Field(
-        default=None,
-        description="Availability zones",
-    )
-    vpc_config: Optional[VpcConfig] = Field(
-        default=None,
-        description="VPC configuration",
-    )
-    eks_config: Optional[EksConfig] = Field(
-        default=None,
-        description="EKS cluster configuration",
-    )
-    node_group_config: Optional[NodeGroupConfig] = Field(
-        default=None,
-        description="Node group configuration",
-    )
-    tags: Optional[dict[str, str]] = Field(
-        default=None,
-        description="Custom tags",
-    )
+    This is what gets stored - complete config with all defaults filled.
+    Every field is explicitly set, no optionals.
+    """
 
-    @field_validator("aws_region")
-    @classmethod
-    def validate_aws_region(cls, v: Optional[str]) -> Optional[str]:
-        """Validate AWS region format if provided."""
-        if v is None:
-            return v
-        valid_regions = [
-            "us-east-1",
-            "us-east-2",
-            "us-west-1",
-            "us-west-2",
-            "eu-west-1",
-            "eu-west-2",
-            "eu-west-3",
-            "eu-central-1",
-            "eu-north-1",
-            "ap-south-1",
-            "ap-southeast-1",
-            "ap-southeast-2",
-            "ap-northeast-1",
-            "ap-northeast-2",
-            "ap-northeast-3",
-            "sa-east-1",
-            "ca-central-1",
-        ]
-        if v not in valid_regions:
-            raise ValueError(f"Invalid AWS region. Must be one of: {valid_regions}")
-        return v
+    customer_id: str
+    environment: str
 
+    aws_config: AwsConfigResolved
+    vpc_config: VpcConfigResolved
+    eks_config: EksConfigResolved
 
-class CustomerConfig(BaseModel):
-    """Full customer configuration model (stored in file)."""
+    tags: dict[str, str]
 
-    customer_id: str = Field(
-        ...,
-        description="Unique customer identifier",
-    )
-    role_arn: str = Field(
-        ...,
-        description="Customer's IAM role ARN for cross-account access",
-    )
-    external_id: str = Field(
-        ...,
-        description="External ID for secure role assumption",
-    )
-    aws_region: str = Field(
-        default="us-east-1",
-        description="AWS region for deployment",
-    )
-    availability_zones: Optional[list[str]] = Field(
-        default=None,
-        description="Availability zones",
-    )
-    vpc_config: VpcConfig = Field(
-        default_factory=VpcConfig,
-        description="VPC configuration",
-    )
-    eks_config: EksConfig = Field(
-        default_factory=EksConfig,
-        description="EKS cluster configuration",
-    )
-    node_group_config: Optional[NodeGroupConfig] = Field(
-        default=None,
-        description="Node group configuration",
-    )
-    tags: dict[str, str] = Field(
-        default_factory=dict,
-        description="Custom tags",
-    )
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        description="Configuration creation timestamp",
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        description="Configuration last update timestamp",
-    )
-
-    @classmethod
-    def from_create_request(cls, request: CustomerConfigCreate) -> "CustomerConfig":
-        """Create a CustomerConfig from a create request."""
-        now = datetime.now(timezone.utc)
-        return cls(
-            customer_id=request.customer_id,
-            role_arn=request.role_arn,
-            external_id=request.external_id,
-            aws_region=request.aws_region,
-            availability_zones=request.availability_zones,
-            vpc_config=request.vpc_config,
-            eks_config=request.eks_config,
-            node_group_config=request.node_group_config,
-            tags=request.tags,
-            created_at=now,
-            updated_at=now,
-        )
-
-    def apply_update(self, update: CustomerConfigUpdate) -> "CustomerConfig":
-        """Apply an update to this configuration."""
-        update_data = update.model_dump(exclude_unset=True)
-        current_data = self.model_dump()
-        current_data.update(update_data)
-        current_data["updated_at"] = datetime.now(timezone.utc)
-        return CustomerConfig.model_validate(current_data)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class CustomerConfigResponse(BaseModel):
     """Response model for customer configuration (hides sensitive fields)."""
 
     customer_id: str
-    role_arn: str
+    environment: str
     aws_region: str
-    availability_zones: Optional[list[str]]
-    vpc_config: VpcConfig
-    eks_config: EksConfig
-    node_group_config: Optional[NodeGroupConfig]
+    vpc_config: VpcConfigResolved
+    eks_config: EksConfigResolved
     tags: dict[str, str]
     created_at: datetime
     updated_at: datetime
 
     @classmethod
-    def from_config(cls, config: CustomerConfig) -> "CustomerConfigResponse":
-        """Create a response from a full config (excludes external_id)."""
+    def from_resolved(cls, config: CustomerConfigResolved) -> "CustomerConfigResponse":
+        """Create response from resolved config (excludes sensitive AWS fields)."""
         return cls(
             customer_id=config.customer_id,
-            role_arn=config.role_arn,
-            aws_region=config.aws_region,
-            availability_zones=config.availability_zones,
+            environment=config.environment,
+            aws_region=config.aws_config.region,
             vpc_config=config.vpc_config,
             eks_config=config.eks_config,
-            node_group_config=config.node_group_config,
             tags=config.tags,
             created_at=config.created_at,
             updated_at=config.updated_at,
@@ -765,67 +587,43 @@ class CustomerConfigListResponse(BaseModel):
     total: int
 
 
-# -----------------------------------------------------------------------------
-# Deployment Request/Response Models
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Deployment Models
+# =============================================================================
 
 
-class CustomerOnboardRequest(BaseModel):
-    """Request to onboard a new customer."""
+class DeployRequest(BaseModel):
+    """Request model for triggering a deployment."""
 
-    customer_id: str = Field(
-        ...,
-        description="Unique customer identifier (used in stack name)",
-        pattern=r"^[a-z0-9-]+$",
-        min_length=3,
-        max_length=50,
-    )
     environment: str = Field(
         default="prod",
-        description="Environment name (dev/staging/prod)",
+        description="Environment name",
         pattern=r"^[a-z0-9-]+$",
     )
 
-    role_arn: str = Field(
-        ...,
-        description="Customer's IAM role ARN for cross-account access",
-        pattern=r"^arn:aws:iam::\d{12}:role/.+$",
-    )
-    external_id: str = Field(
-        ...,
-        description="External ID for secure role assumption",
-        min_length=10,
-    )
 
-    aws_region: str = Field(
-        default="us-east-1",
-        description="AWS region for deployment",
-    )
+class DestroyRequest(BaseModel):
+    """Request model for destroying infrastructure."""
 
-    vpc_config: VpcConfig = Field(
-        default_factory=VpcConfig,
-        description="VPC configuration",
-    )
+    confirm: bool = Field(..., description="Must be true to confirm destruction")
 
-    availability_zones: Optional[list[str]] = Field(
-        default=None,
-        description="Availability zones (defaults to 3 AZs in the region)",
-    )
+    @field_validator("confirm")
+    @classmethod
+    def validate_confirm(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("confirm must be true to destroy infrastructure")
+        return v
 
-    eks_config: EksConfig = Field(
-        default_factory=EksConfig,
-        description="EKS cluster configuration",
-    )
 
-    node_group_config: Optional[NodeGroupConfig] = Field(
-        default=None,
-        description="Node group configuration (only used when eks_mode=managed)",
-    )
+class DeploymentResponse(BaseModel):
+    """Response for deployment operations."""
 
-    tags: dict[str, str] = Field(
-        default_factory=dict,
-        description="Custom tags",
-    )
+    customer_id: str
+    environment: str
+    stack_name: str
+    status: DeploymentStatus
+    message: str
+    deployment_id: Optional[str] = None
 
 
 class CustomerDeployment(BaseModel):
@@ -848,39 +646,22 @@ class CustomerDeployment(BaseModel):
         from_attributes = True
 
 
-class DeploymentResponse(BaseModel):
-    """Response for deployment operations."""
+# =============================================================================
+# Validation Error Models
+# =============================================================================
 
-    customer_id: str
-    environment: str
-    stack_name: str
-    status: DeploymentStatus
+
+class ValidationErrorDetail(BaseModel):
+    """Single validation error detail."""
+
+    field: str
     message: str
-    deployment_id: Optional[str] = None
+    value: Optional[str] = None
 
 
-class DeployRequest(BaseModel):
-    """Request model for triggering a deployment."""
+class ValidationErrorResponse(BaseModel):
+    """Structured validation error response."""
 
-    environment: str = Field(
-        default="prod",
-        description="Environment name (dev/staging/prod)",
-        pattern=r"^[a-z0-9-]+$",
-    )
-
-
-class DestroyRequest(BaseModel):
-    """Request model for destroying infrastructure."""
-
-    confirm: bool = Field(
-        ...,
-        description="Must be true to confirm destruction",
-    )
-
-    @field_validator("confirm")
-    @classmethod
-    def validate_confirm(cls, v: bool) -> bool:
-        """Ensure confirm is explicitly set to true."""
-        if not v:
-            raise ValueError("confirm must be true to destroy infrastructure")
-        return v
+    error: str = "validation_error"
+    message: str
+    details: list[ValidationErrorDetail]

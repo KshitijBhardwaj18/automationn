@@ -1,0 +1,22 @@
+config:
+  byoc-platform:customerId: neo-test
+  byoc-platform:environment: dev
+  byoc-platform:customerRoleArn: arn:aws:iam::123456789012:role/test-role
+  byoc-platform:externalId:
+    secure: AAABAP24R0CGfKBCqtmgFTs0P5p3ZbOFU13VJbMTqWB+N5qGhsozcagSEXKVdnoBnbbXGy/v
+  byoc-platform:awsRegion: us-east-1
+  byoc-platform:availabilityZones: us-east-1a,us-east-1b,us-east-1c
+  byoc-platform:vpcCidr: 10.0.0.0/16
+  byoc-platform:natGatewayStrategy: single
+  byoc-platform:publicSubnets: '[{"cidr_block":"10.0.0.0/24","availability_zone":"us-east-1a","name":"neo-test-public-a","tags":{}},{"cidr_block":"10.0.1.0/24","availability_zone":"us-east-1b","name":"neo-test-public-b","tags":{}},{"cidr_block":"10.0.2.0/24","availability_zone":"us-east-1c","name":"neo-test-public-c","tags":{}}]'
+  byoc-platform:privateSubnets: '[{"cidr_block":"10.0.16.0/20","availability_zone":"us-east-1a","name":"neo-test-private-a","tags":{}},{"cidr_block":"10.0.32.0/20","availability_zone":"us-east-1b","name":"neo-test-private-b","tags":{}},{"cidr_block":"10.0.48.0/20","availability_zone":"us-east-1c","name":"neo-test-private-c","tags":{}}]'
+  byoc-platform:vpcEndpointS3: "true"
+  byoc-platform:eksVersion: "1.31"
+  byoc-platform:eksMode: auto
+  byoc-platform:serviceIpv4Cidr: 172.20.0.0/16
+  byoc-platform:endpointPrivateAccess: "true"
+  byoc-platform:endpointPublicAccess: "false"
+  byoc-platform:bootstrapClusterCreatorAdmin: "true"
+  byoc-platform:authenticationMode: API_AND_CONFIG_MAP
+  byoc-platform:encryptionEnabled: "true"
+  byoc-platform:loggingEnabled: "false"

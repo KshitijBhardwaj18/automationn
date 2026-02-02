@@ -18,14 +18,18 @@ class EksIamRoles(pulumi.ComponentResource):
 
         child_opts = pulumi.ResourceOptions(parent=self, provider=provider)
 
-        eks_assume_role_policy = json.dumps({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Service": "eks.amazonaws.com"},
-                "Action": "sts:AssumeRole"
-            }]
-        })
+        eks_assume_role_policy = json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"Service": "eks.amazonaws.com"},
+                        "Action": "sts:AssumeRole",
+                    }
+                ],
+            }
+        )
 
         self.cluster_role = aws.iam.Role(
             f"{name}-eks-cluster-role",
@@ -49,38 +53,42 @@ class EksIamRoles(pulumi.ComponentResource):
 
         if eks_mode == "auto":
             aws.iam.RolePolicyAttachment(
-            f"{name}-eks-cluster-compute-policy",
-            role=self.cluster_role.name,
-            policy_arn="arn:aws:iam::aws:policy/AmazonEKSComputePolicy",
-            opts=child_opts,
-           )
-            aws.iam.RolePolicyAttachment(
-            f"{name}-eks-cluster-storage-policy",
-            role=self.cluster_role.name,
-            policy_arn="arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy",
-            opts=child_opts,
+                f"{name}-eks-cluster-compute-policy",
+                role=self.cluster_role.name,
+                policy_arn="arn:aws:iam::aws:policy/AmazonEKSComputePolicy",
+                opts=child_opts,
             )
             aws.iam.RolePolicyAttachment(
-            f"{name}-eks-cluster-lb-policy",
-            role=self.cluster_role.name,
-            policy_arn="arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy",
-            opts=child_opts,
+                f"{name}-eks-cluster-storage-policy",
+                role=self.cluster_role.name,
+                policy_arn="arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy",
+                opts=child_opts,
             )
             aws.iam.RolePolicyAttachment(
-            f"{name}-eks-cluster-networking-policy",
-            role=self.cluster_role.name,
-            policy_arn="arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy",
-            opts=child_opts,
+                f"{name}-eks-cluster-lb-policy",
+                role=self.cluster_role.name,
+                policy_arn="arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy",
+                opts=child_opts,
+            )
+            aws.iam.RolePolicyAttachment(
+                f"{name}-eks-cluster-networking-policy",
+                role=self.cluster_role.name,
+                policy_arn="arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy",
+                opts=child_opts,
             )
 
-        ec2_assume_role_policy = json.dumps({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Service": "ec2.amazonaws.com"},
-                "Action": "sts:AssumeRole"
-            }]
-        })
+        ec2_assume_role_policy = json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"Service": "ec2.amazonaws.com"},
+                        "Action": "sts:AssumeRole",
+                    }
+                ],
+            }
+        )
 
         self.node_role = aws.iam.Role(
             f"{name}-eks-node-role",
@@ -113,8 +121,10 @@ class EksIamRoles(pulumi.ComponentResource):
         self.node_role_arn = self.node_role.arn
         self.node_instance_profile_arn = self.node_instance_profile.arn
 
-        self.register_outputs({
-            "cluster_role_arn": self.cluster_role_arn,
-            "node_role_arn": self.node_role_arn,
-            "node_instance_profile_arn": self.node_instance_profile_arn,
-        })
+        self.register_outputs(
+            {
+                "cluster_role_arn": self.cluster_role_arn,
+                "node_role_arn": self.node_role_arn,
+                "node_instance_profile_arn": self.node_instance_profile_arn,
+            }
+        )
