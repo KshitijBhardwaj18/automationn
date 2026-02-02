@@ -16,7 +16,7 @@ aws_provider = create_customer_aws_provider(config)
 
 # Create networking infrastructure
 networking = Networking(
-    name=config.customer_name,
+    name=config.customer_id,
     vpc_config=config.vpc_config,
     availability_zones=config.availability_zones,
     provider=aws_provider,
@@ -41,7 +41,6 @@ eks = EksCluster(
     cluster_role_arn=iam.cluster_role_arn,
     node_role_arn=iam.node_role_arn,
     eks_config=config.eks_config,
-    node_group_config=config.node_group_config,
     provider=aws_provider,
     tags=config.tags,
     opts=pulumi.ResourceOptions(depends_on=[iam]),
@@ -66,13 +65,17 @@ pulumi.export("eks_mode", config.eks_config.mode.value)
 pulumi.export("eks_oidc_provider_arn", eks.oidc_provider_arn)
 
 # Export configuration summary
-pulumi.export("config_summary", {
-    "customer_name": config.customer_name,
-    "environment": config.environment,
-    "aws_region": config.aws_region,
-    "eks_version": config.eks_config.version,
-    "eks_mode": config.eks_config.mode.value,
-    "endpoint_access": config.eks_config.access.endpoint_access.value,
-    "nat_gateway_strategy": config.vpc_config.nat_gateway_strategy.value,
-    "service_cidr": config.eks_config.service_ipv4_cidr,
-})
+pulumi.export(
+    "config_summary",
+    {
+        "customer_id": config.customer_id,
+        "environment": config.environment,
+        "aws_region": config.aws_region,
+        "eks_version": config.eks_config.version,
+        "eks_mode": config.eks_config.mode.value,
+        "endpoint_private_access": config.eks_config.access.endpoint_private_access,
+        "endpoint_public_access": config.eks_config.access.endpoint_public_access,
+        "nat_gateway_strategy": config.vpc_config.nat_gateway_strategy.value,
+        "service_cidr": config.eks_config.service_ipv4_cidr,
+    },
+)
