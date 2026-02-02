@@ -1,15 +1,18 @@
 """Customer configuration management endpoints."""
 
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import JSONResponse
 
+from api.config_resolver import resolve_customer_config
 from api.config_storage import config_storage
 from api.models import (
-    CustomerConfig,
-    CustomerConfigCreate,
+    CustomerConfigInput,
     CustomerConfigListResponse,
+    CustomerConfigResolved,
     CustomerConfigResponse,
-    CustomerConfigUpdate,
+    ValidationErrorResponse,
 )
+from api.validation import ConfigValidationError, validate_config
 
 router = APIRouter(prefix="/api/v1/configs", tags=["configurations"])
 
@@ -19,11 +22,24 @@ router = APIRouter(prefix="/api/v1/configs", tags=["configurations"])
     response_model=CustomerConfigResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create customer configuration",
-    description="Create a new customer configuration. The configuration will be stored "
-    "and can be used for deployments.",
+    description="""Create a new customer configuration.
+
+The configuration will be validated and resolved with sensible defaults:
+- Missing VPC config uses 10.0.0.0/16 with auto-calculated subnets
+- Missing EKS config uses Auto mode with encryption enabled
+- Subnets are auto-calculated across 3 AZs if not specified
+
+The fully-resolved configuration is stored and can be used for deployments.
+""",
+    responses={
+        201: {"description": "Configuration created successfully"},
+        400: {"model": ValidationErrorResponse, "description": "Validation error"},
+        409: {"description": "Configuration already exists"},
+    },
 )
-async def create_config(request: CustomerConfigCreate) -> CustomerConfigResponse:
-    """Create a new customer configuration. """
+async def create_config(request: CustomerConfigInput) -> CustomerConfigResponse:
+    """Create a new customer configuration."""
+    # Check if config already exists
     if config_storage.exists(request.customer_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -31,10 +47,24 @@ async def create_config(request: CustomerConfigCreate) -> CustomerConfigResponse
             "Use PUT to update.",
         )
 
-    config = CustomerConfig.from_create_request(request)
-    config_storage.save(request.customer_id, config)
+    try:
+        # Resolve config with defaults
+        resolved = resolve_customer_config(request)
 
-    return CustomerConfigResponse.from_config(config)
+        # Validate the resolved config
+        validate_config(request, resolved)
+
+        # Store the fully-resolved config
+        config_storage.save(request.customer_id, resolved)
+
+        return CustomerConfigResponse.from_resolved(resolved)
+
+    except ConfigValidationError as e:
+        # Return structured validation errors
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=e.to_response().model_dump(),
+        )
 
 
 @router.get(
@@ -47,7 +77,7 @@ async def list_configs() -> CustomerConfigListResponse:
     """List all customer configurations."""
     configs = config_storage.list_all()
     return CustomerConfigListResponse(
-        configs=[CustomerConfigResponse.from_config(c) for c in configs],
+        configs=[CustomerConfigResponse.from_resolved(c) for c in configs],
         total=len(configs),
     )
 
@@ -56,10 +86,10 @@ async def list_configs() -> CustomerConfigListResponse:
     "/{customer_id}",
     response_model=CustomerConfigResponse,
     summary="Get customer configuration",
-    description="Retrieve a specific customer's configuration.",
+    description="Retrieve a specific customer's fully-resolved configuration.",
 )
 async def get_config(customer_id: str) -> CustomerConfigResponse:
-    """Get a customer configuration by ID"""
+    """Get a customer configuration by ID."""
     config = config_storage.get(customer_id)
     if config is None:
         raise HTTPException(
@@ -67,21 +97,48 @@ async def get_config(customer_id: str) -> CustomerConfigResponse:
             detail=f"Configuration for customer '{customer_id}' not found",
         )
 
-    return CustomerConfigResponse.from_config(config)
+    return CustomerConfigResponse.from_resolved(config)
+
+
+@router.get(
+    "/{customer_id}/full",
+    response_model=CustomerConfigResolved,
+    summary="Get full resolved configuration",
+    description="Retrieve the complete resolved configuration including all internal fields.",
+)
+async def get_full_config(customer_id: str) -> CustomerConfigResolved:
+    """Get the full resolved configuration (for debugging/advanced use)."""
+    config = config_storage.get(customer_id)
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Configuration for customer '{customer_id}' not found",
+        )
+
+    return config
 
 
 @router.put(
     "/{customer_id}",
     response_model=CustomerConfigResponse,
     summary="Update customer configuration",
-    description="Update an existing customer's configuration. Only provided fields "
-    "will be updated.",
+    description="""Update an existing customer's configuration.
+
+The new configuration will be fully re-resolved and validated.
+All fields are replaced (this is not a partial update).
+""",
+    responses={
+        200: {"description": "Configuration updated successfully"},
+        400: {"model": ValidationErrorResponse, "description": "Validation error"},
+        404: {"description": "Configuration not found"},
+    },
 )
 async def update_config(
     customer_id: str,
-    request: CustomerConfigUpdate,
+    request: CustomerConfigInput,
 ) -> CustomerConfigResponse:
     """Update a customer configuration."""
+    # Check if config exists
     existing_config = config_storage.get(customer_id)
     if existing_config is None:
         raise HTTPException(
@@ -89,10 +146,33 @@ async def update_config(
             detail=f"Configuration for customer '{customer_id}' not found",
         )
 
-    updated_config = existing_config.apply_update(request)
-    config_storage.save(customer_id, updated_config)
+    # Ensure customer_id matches
+    if request.customer_id != customer_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Customer ID in request body '{request.customer_id}' does not match URL '{customer_id}'",
+        )
 
-    return CustomerConfigResponse.from_config(updated_config)
+    try:
+        # Resolve config with defaults
+        resolved = resolve_customer_config(request)
+
+        # Preserve original creation time
+        resolved.created_at = existing_config.created_at
+
+        # Validate the resolved config
+        validate_config(request, resolved)
+
+        # Store the updated config
+        config_storage.save(customer_id, resolved)
+
+        return CustomerConfigResponse.from_resolved(resolved)
+
+    except ConfigValidationError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=e.to_response().model_dump(),
+        )
 
 
 @router.delete(
@@ -108,4 +188,37 @@ async def delete_config(customer_id: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Configuration for customer '{customer_id}' not found",
+        )
+
+
+@router.post(
+    "/validate",
+    response_model=CustomerConfigResponse,
+    summary="Validate configuration without saving",
+    description="""Validate a configuration and return the resolved result without saving.
+
+Useful for testing configurations before creating them.
+""",
+    responses={
+        200: {"description": "Configuration is valid"},
+        400: {"model": ValidationErrorResponse, "description": "Validation error"},
+    },
+)
+async def validate_config_endpoint(
+    request: CustomerConfigInput,
+) -> CustomerConfigResponse:
+    """Validate a configuration without saving it."""
+    try:
+        # Resolve config with defaults
+        resolved = resolve_customer_config(request)
+
+        # Validate the resolved config
+        validate_config(request, resolved)
+
+        return CustomerConfigResponse.from_resolved(resolved)
+
+    except ConfigValidationError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=e.to_response().model_dump(),
         )

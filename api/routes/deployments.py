@@ -7,9 +7,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 from api.config_storage import config_storage
 from api.database import Database, db
 from api.models import (
-    CustomerConfig,
+    CustomerConfigResolved,
     CustomerDeployment,
-    CustomerOnboardRequest,
     DeploymentResponse,
     DeploymentStatus,
     DeployRequest,
@@ -32,27 +31,8 @@ def get_pulumi_client() -> PulumiDeploymentsClient:
     )
 
 
-def config_to_onboard_request(
-    config: CustomerConfig,
-    environment: str,
-) -> CustomerOnboardRequest:
-    """Convert a CustomerConfig to a CustomerOnboardRequest."""
-    return CustomerOnboardRequest(
-        customer_id=config.customer_id,
-        environment=environment,
-        role_arn=config.role_arn,
-        external_id=config.external_id,
-        aws_region=config.aws_region,
-        vpc_config=config.vpc_config,
-        availability_zones=config.availability_zones,
-        eks_config=config.eks_config,
-        node_group_config=config.node_group_config,
-        tags=config.tags,
-    )
-
-
 async def run_deployment(
-    config: CustomerConfig,
+    config: CustomerConfigResolved,
     environment: str,
     database: Database,
 ) -> None:
@@ -75,12 +55,10 @@ async def run_deployment(
         except Exception:
             pass
 
-        request = config_to_onboard_request(config, environment)
-
         await client.configure_deployment_settings(
             project_name=settings.pulumi_project,
             stack_name=stack_name,
-            request=request,
+            config=config,
             repo_url=settings.git_repo_url,
             repo_branch=settings.git_repo_branch,
             repo_dir=settings.git_repo_dir,
@@ -151,8 +129,8 @@ async def deploy(
             db.create_deployment(
                 customer_id=customer_id,
                 environment=request.environment,
-                aws_region=config.aws_region,
-                role_arn=config.role_arn,
+                aws_region=config.aws_config.region,
+                role_arn=config.aws_config.role_arn,
             )
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))

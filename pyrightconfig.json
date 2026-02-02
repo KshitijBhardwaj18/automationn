@@ -1,0 +1,8 @@
+{
+  "venvPath": "/workspace/automationn",
+  "venv": "venv",
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": false,
+  "exclude": ["**/node_modules", "**/__pycache__"]
+}
