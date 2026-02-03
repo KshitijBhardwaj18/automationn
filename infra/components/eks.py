@@ -1,5 +1,6 @@
 """EKS cluster infrastructure component."""
 
+import json
 from typing import Sequence
 
 import pulumi
@@ -270,6 +271,76 @@ class EksCluster(pulumi.ComponentResource):
             ),
         )
 
+    def _create_addon_irsa_role(
+        self,
+        addon_name: str,
+        service_account_name: str,
+        namespace: str,
+        managed_policy_arns: list[str],
+    ) -> aws.iam.Role:
+        """Create IAM role for an addon using IRSA (IAM Roles for Service Accounts).
+
+        This creates a role that the addon's service account can assume via OIDC federation.
+        """
+        # Build the trust policy for OIDC federation
+        # The OIDC provider ARN and URL are needed for the trust relationship
+        oidc_provider_arn = self.oidc_provider.arn
+        oidc_issuer_url = self.cluster.identities[0].oidcs[0].issuer
+
+        # Create the assume role policy document as JSON string
+        assume_role_policy = pulumi.Output.all(
+            oidc_provider_arn, oidc_issuer_url
+        ).apply(
+            lambda args: json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {"Federated": args[0]},
+                            "Action": "sts:AssumeRoleWithWebIdentity",
+                            "Condition": {
+                                "StringEquals": {
+                                    f"{args[1].replace('https://', '')}:aud": "sts.amazonaws.com",
+                                    f"{args[1].replace('https://', '')}:sub": f"system:serviceaccount:{namespace}:{service_account_name}",
+                                }
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+
+        # Create the IAM role
+        role = aws.iam.Role(
+            f"{self._name}-{addon_name}-role",
+            name=f"{self._name}-{addon_name}-role",
+            assume_role_policy=assume_role_policy,
+            tags={
+                "Name": f"{self._name}-{addon_name}-role",
+                **self._tags,
+            },
+            opts=pulumi.ResourceOptions(
+                parent=self,
+                provider=self._provider,
+                depends_on=[self.oidc_provider],
+            ),
+        )
+
+        # Attach managed policies
+        for i, policy_arn in enumerate(managed_policy_arns):
+            aws.iam.RolePolicyAttachment(
+                f"{self._name}-{addon_name}-policy-{i}",
+                role=role.name,
+                policy_arn=policy_arn,
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                ),
+            )
+
+        return role
+
     def _create_addons(
         self,
         eks_config: EksConfigResolved,
@@ -278,19 +349,30 @@ class EksCluster(pulumi.ComponentResource):
         """Create EKS addons for managed mode."""
         addons = eks_config.addons
 
-        # VPC CNI addon
+        # VPC CNI addon - needs IRSA for custom networking, prefix delegation, security groups for pods
         if addons.vpc_cni.enabled:
+            # Create IAM role for VPC CNI with OIDC trust policy
+            vpc_cni_role = self._create_addon_irsa_role(
+                addon_name="vpc-cni",
+                service_account_name="aws-node",
+                namespace="kube-system",
+                managed_policy_arns=[
+                    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+                ],
+            )
+
             self.vpc_cni_addon = aws.eks.Addon(
                 f"{self._name}-vpc-cni",
                 cluster_name=self.cluster.name,
                 addon_name="vpc-cni",
+                service_account_role_arn=vpc_cni_role.arn,
                 resolve_conflicts_on_create=addons.vpc_cni.resolve_conflicts_on_create,
                 resolve_conflicts_on_update=addons.vpc_cni.resolve_conflicts_on_update,
                 tags={"Name": f"{self._name}-vpc-cni", **self._tags},
                 opts=pulumi.ResourceOptions(
                     parent=self,
                     provider=self._provider,
-                    depends_on=[self.cluster],
+                    depends_on=[self.cluster, self.oidc_provider, vpc_cni_role],
                 ),
             )
 
@@ -330,19 +412,57 @@ class EksCluster(pulumi.ComponentResource):
                 ),
             )
 
-        # EBS CSI Driver addon
+        # EBS CSI Driver addon - requires IAM role for IRSA
         if addons.ebs_csi_driver.enabled:
+            # Create IAM role for EBS CSI driver with OIDC trust policy
+            ebs_csi_role = self._create_addon_irsa_role(
+                addon_name="ebs-csi",
+                service_account_name="ebs-csi-controller-sa",
+                namespace="kube-system",
+                managed_policy_arns=[
+                    "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy",
+                ],
+            )
+
             self.ebs_csi_addon = aws.eks.Addon(
                 f"{self._name}-ebs-csi",
                 cluster_name=self.cluster.name,
                 addon_name="aws-ebs-csi-driver",
+                service_account_role_arn=ebs_csi_role.arn,
                 resolve_conflicts_on_create=addons.ebs_csi_driver.resolve_conflicts_on_create,
                 resolve_conflicts_on_update=addons.ebs_csi_driver.resolve_conflicts_on_update,
                 tags={"Name": f"{self._name}-ebs-csi", **self._tags},
                 opts=pulumi.ResourceOptions(
                     parent=self,
                     provider=self._provider,
-                    depends_on=[self.cluster],
+                    depends_on=[self.cluster, self.oidc_provider, ebs_csi_role],
+                ),
+            )
+
+        # EFS CSI Driver addon - requires IAM role for IRSA
+        if addons.efs_csi_driver.enabled:
+            # Create IAM role for EFS CSI driver with OIDC trust policy
+            efs_csi_role = self._create_addon_irsa_role(
+                addon_name="efs-csi",
+                service_account_name="efs-csi-controller-sa",
+                namespace="kube-system",
+                managed_policy_arns=[
+                    "arn:aws:iam::aws:policy/service-role/AmazonEFSCSIDriverPolicy",
+                ],
+            )
+
+            self.efs_csi_addon = aws.eks.Addon(
+                f"{self._name}-efs-csi",
+                cluster_name=self.cluster.name,
+                addon_name="aws-efs-csi-driver",
+                service_account_role_arn=efs_csi_role.arn,
+                resolve_conflicts_on_create=addons.efs_csi_driver.resolve_conflicts_on_create,
+                resolve_conflicts_on_update=addons.efs_csi_driver.resolve_conflicts_on_update,
+                tags={"Name": f"{self._name}-efs-csi", **self._tags},
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[self.cluster, self.oidc_provider, efs_csi_role],
                 ),
             )
 
@@ -355,6 +475,22 @@ class EksCluster(pulumi.ComponentResource):
                 resolve_conflicts_on_create=addons.pod_identity_agent.resolve_conflicts_on_create,
                 resolve_conflicts_on_update=addons.pod_identity_agent.resolve_conflicts_on_update,
                 tags={"Name": f"{self._name}-pod-identity", **self._tags},
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    provider=self._provider,
+                    depends_on=[self.cluster],
+                ),
+            )
+
+        # Snapshot Controller addon
+        if addons.snapshot_controller.enabled:
+            self.snapshot_addon = aws.eks.Addon(
+                f"{self._name}-snapshot-controller",
+                cluster_name=self.cluster.name,
+                addon_name="snapshot-controller",
+                resolve_conflicts_on_create=addons.snapshot_controller.resolve_conflicts_on_create,
+                resolve_conflicts_on_update=addons.snapshot_controller.resolve_conflicts_on_update,
+                tags={"Name": f"{self._name}-snapshot-controller", **self._tags},
                 opts=pulumi.ResourceOptions(
                     parent=self,
                     provider=self._provider,
