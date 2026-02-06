@@ -108,14 +108,13 @@ async def update_config(
     request: CustomerConfigInput,
 ) -> Union[CustomerConfigResponse, JSONResponse]:
     """Update a customer configuration."""
-   
+
     existing_config = config_storage.get(customer_id)
     if existing_config is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Configuration for customer '{customer_id}' not found",
         )
-
 
     if request.customer_id != customer_id:
         raise HTTPException(
@@ -124,16 +123,12 @@ async def update_config(
         )
 
     try:
-       
         resolved = resolve_customer_config(request)
 
-       
         resolved.created_at = existing_config.created_at
 
-     
         validate_config(request, resolved)
 
-      
         config_storage.save(customer_id, resolved)
 
         return CustomerConfigResponse.from_resolved(resolved)
@@ -176,7 +171,6 @@ async def validate_config_endpoint(
 ) -> Union[CustomerConfigResponse, JSONResponse]:
     """Validate a configuration without saving it."""
     try:
-        
         resolved = resolve_customer_config(request)
 
         validate_config(request, resolved)

@@ -1,12 +1,12 @@
 from fastapi import APIRouter, HTTPException, status
 
-from api.services.ssm_access import SsmAccessService
-from api.models import (
-    SsmStatusResponse,
-    SsmSessionResponse,
-    DeploymentStatus,
-)
 from api.database import db
+from api.models import (
+    DeploymentStatus,
+    SsmSessionResponse,
+    SsmStatusResponse,
+)
+from api.services.ssm_access import SsmAccessService
 
 router = APIRouter(prefix="/api/v1/clusters", tags=["cluster access"])
 
@@ -22,7 +22,7 @@ async def get_ssm_status(
     environment: str = "prod",
 ) -> SsmStatusResponse:
     """Get SSM access node status and readiness."""
-    
+
     deployment = db.get_deployment(customer_id, environment)
     if not deployment:
         raise HTTPException(
@@ -38,27 +38,27 @@ async def get_ssm_status(
 
     try:
         service = SsmAccessService(customer_id, environment)
-        
+
         node_status = await service.get_access_node_status()
-        
+
         vpc_endpoints = await service.check_vpc_endpoints()
-        
+
         issues = []
-        
+
         if not node_status.enabled:
             issues.append("SSM access node is not enabled in deployment config")
         elif node_status.instance_state != "running":
             issues.append(f"Access node is not running (state: {node_status.instance_state})")
-        
+
         if not vpc_endpoints.get("ssm"):
             issues.append("VPC endpoint for SSM is not configured")
         if not vpc_endpoints.get("ssmmessages"):
             issues.append("VPC endpoint for SSM Messages is not configured")
         if not vpc_endpoints.get("ec2messages"):
             issues.append("VPC endpoint for EC2 Messages is not configured")
-        
+
         ready = len(issues) == 0
-        
+
         return SsmStatusResponse(
             customer_id=customer_id,
             environment=environment,
@@ -89,7 +89,7 @@ async def get_ssm_session(
     environment: str = "prod",
 ) -> SsmSessionResponse:
     """Get SSM session connection information."""
-    
+
     deployment = db.get_deployment(customer_id, environment)
     if not deployment:
         raise HTTPException(
@@ -106,7 +106,7 @@ async def get_ssm_session(
     try:
         service = SsmAccessService(customer_id, environment)
         session_info = await service.get_session_info()
-        
+
         return SsmSessionResponse(
             customer_id=customer_id,
             environment=environment,

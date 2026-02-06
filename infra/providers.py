@@ -3,6 +3,7 @@ import pulumi_aws as aws
 
 from infra.config import PulumiCustomerConfig
 
+
 def create_customer_aws_provider(config: PulumiCustomerConfig) -> aws.Provider:
     """Create AWS provider that assumes role in customer's AWS account."""
 

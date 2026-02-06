@@ -1,12 +1,14 @@
 import pulumi
 import pulumi_aws as aws
+import pulumi_kubernetes as k8s
 
+from infra.components.access_node import AccessNode
+from infra.components.addons import ClusterAddons
 from infra.components.eks import EksCluster
 from infra.components.iam import EksIamRoles
 from infra.components.networking import Networking
 from infra.config import load_customer_config
 from infra.providers import create_customer_aws_provider
-from infra.components.access_node import AccessNode
 
 config = load_customer_config()
 
@@ -42,10 +44,8 @@ eks = EksCluster(
 )
 
 access_node = None
-if (
-    config.eks_config.access.ssm_access_node
-    and config.eks_config.access.ssm_access_node.enabled
-):
+if config.eks_config.access.ssm_access_node and config.eks_config.access.ssm_access_node.enabled:
+
     def get_first_subnet(ids: list[str]) -> str:
         if not ids:
             raise ValueError("No private subnets available for access node")
@@ -95,6 +95,66 @@ if access_node:
     pulumi.export("access_node_private_ip", access_node.private_ip)
     pulumi.export("access_node_role_arn", access_node.role.arn)
 
+# =============================================================================
+# Kubernetes Provider and Cluster Addons
+# =============================================================================
+
+# Create Kubernetes provider for in-cluster resources
+k8s_provider = k8s.Provider(
+    f"{config.customer_id}-k8s-provider",
+    kubeconfig=pulumi.Output.all(
+        eks.cluster_name,
+        eks.cluster_endpoint,
+        eks.cluster_ca_data,
+    ).apply(
+        lambda args: (
+            f"""apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: {args[1]}
+    certificate-authority-data: {args[2]}
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: aws
+  name: aws
+current-context: aws
+users:
+- name: aws
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args:
+        - eks
+        - get-token
+        - --cluster-name
+        - {args[0]}
+        - --region
+        - {config.aws_region}
+        - --role-arn
+        - {config.customer_role_arn}
+"""
+        )
+    ),
+)
+
+# Install cluster addons (ArgoCD, etc.) if enabled
+cluster_addons = None
+if config.addons.argocd.enabled:
+    cluster_addons = ClusterAddons(
+        name=config.customer_id,
+        addons_config=config.addons,
+        k8s_provider=k8s_provider,
+        opts=pulumi.ResourceOptions(depends_on=[eks]),
+    )
+
+# =============================================================================
+# Exports
+# =============================================================================
+
 pulumi.export("vpc_id", networking.vpc_id)
 pulumi.export("private_subnet_ids", networking.private_subnet_ids)
 pulumi.export("public_subnet_ids", networking.public_subnet_ids)
@@ -113,6 +173,9 @@ pulumi.export("eks_mode", config.eks_config.mode.value)
 pulumi.export("eks_oidc_provider_arn", eks.oidc_provider_arn)
 
 
+# Addons exports
+pulumi.export("argocd_enabled", config.addons.argocd.enabled)
+
 pulumi.export(
     "config_summary",
     {
@@ -125,5 +188,6 @@ pulumi.export(
         "endpoint_public_access": config.eks_config.access.endpoint_public_access,
         "nat_gateway_strategy": config.vpc_config.nat_gateway_strategy.value,
         "service_cidr": config.eks_config.service_ipv4_cidr,
+        "argocd_enabled": config.addons.argocd.enabled,
     },
 )
