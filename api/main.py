@@ -1,9 +1,14 @@
 """FastAPI application for BYOC Platform."""
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI
 
 from api.routes.configs import router as configs_router
 from api.routes.deployments import router as deployments_router
+from api.routes.cluster import router as cluster_router
 
 app = FastAPI(
     title="Cortex Prod automation",
@@ -14,6 +19,7 @@ app = FastAPI(
 
 app.include_router(configs_router)
 app.include_router(deployments_router)
+app.include_router(cluster_router)
 
 
 @app.get("/health", tags=["health"])

@@ -1,15 +1,3 @@
-"""Configuration validation - comprehensive checks before persisting configs.
-
-This module performs strict validation to reject invalid configurations early.
-Validation happens AFTER resolution, on the fully-resolved config.
-
-Validation Categories:
-1. CIDR Validation - format, ranges, overlaps
-2. Subnet Validation - within VPC range, no overlaps
-3. Relationship Validation - NAT/IGW requirements, subnet dependencies
-4. Semantic Validation - contradictory settings, invalid combinations
-"""
-
 import ipaddress
 from typing import Optional
 
@@ -40,11 +28,6 @@ class ConfigValidationError(Exception):
             message=f"Configuration validation failed with {len(self.errors)} error(s)",
             details=self.errors,
         )
-
-
-# =============================================================================
-# CIDR Validation Helpers
-# =============================================================================
 
 
 def is_valid_cidr(cidr: str) -> tuple[bool, Optional[str]]:
@@ -78,10 +61,6 @@ def is_subnet_of(subnet_cidr: str, vpc_cidr: str) -> bool:
     except ValueError:
         return False
 
-
-# =============================================================================
-# Input Validation (Pre-Resolution)
-# =============================================================================
 
 
 def validate_input_config(config: CustomerConfigInput) -> list[ValidationErrorDetail]:
@@ -173,18 +152,13 @@ def validate_input_config(config: CustomerConfigInput) -> list[ValidationErrorDe
     return errors
 
 
-# =============================================================================
-# Resolved Config Validation
-# =============================================================================
-
-
 def validate_vpc_cidrs(vpc_config: VpcConfigResolved) -> list[ValidationErrorDetail]:
     """Validate VPC CIDR configurations."""
     errors: list[ValidationErrorDetail] = []
 
     vpc_cidr = vpc_config.cidr_block
 
-    # Check VPC CIDR size (must be /16 to /24)
+    # Check VPC CIDR size (must be /16 to /24 for a valid k8s cluster to exist)
     try:
         vpc_net = ipaddress.ip_network(vpc_cidr, strict=False)
         if vpc_net.prefixlen < 16 or vpc_net.prefixlen > 24:
@@ -196,7 +170,7 @@ def validate_vpc_cidrs(vpc_config: VpcConfigResolved) -> list[ValidationErrorDet
                 )
             )
     except ValueError:
-        pass  # Already validated in input validation
+        pass  
 
     # Check secondary CIDRs don't overlap with primary
     for i, secondary in enumerate(vpc_config.secondary_cidr_blocks):
@@ -490,11 +464,6 @@ def validate_semantic_consistency(
         )
 
     return errors
-
-
-# =============================================================================
-# Main Validation Entry Point
-# =============================================================================
 
 
 def validate_resolved_config(config: CustomerConfigResolved) -> list[ValidationErrorDetail]:

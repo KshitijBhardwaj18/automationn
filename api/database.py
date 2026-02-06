@@ -43,13 +43,13 @@ class CustomerDeploymentRecord(Base):
         Enum(DeploymentStatus), nullable=False, default=DeploymentStatus.PENDING
     )
     pulumi_deployment_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    outputs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
+    outputs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),

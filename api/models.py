@@ -1,26 +1,9 @@
-"""Pydantic models for API requests and responses.
-
-This module defines:
-1. Input models (partial configs from API requests)
-2. Resolved models (fully-expanded configs with all defaults filled)
-3. Response models (what we return to API clients)
-
-Design Philosophy:
-- Sensible defaults follow "simplest secure thing AWS does by default"
-- Mandatory components are always present in resolved configs
-- Input models are permissive; resolved models are complete
-"""
-
 import ipaddress
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
-
-# =============================================================================
-# Enums
-# =============================================================================
 
 
 class DeploymentStatus(str, Enum):
@@ -37,24 +20,24 @@ class DeploymentStatus(str, Enum):
 class EksMode(str, Enum):
     """EKS compute mode."""
 
-    AUTO = "auto"  # EKS Auto Mode - AWS manages compute, storage, networking
-    MANAGED = "managed"  # Traditional managed node groups
+    AUTO = "auto" 
+    MANAGED = "managed"  
 
 
 class NatGatewayStrategy(str, Enum):
     """NAT Gateway deployment strategy."""
 
-    NONE = "none"  # No NAT gateway (public subnets only)
-    SINGLE = "single"  # Single NAT gateway for all AZs (~$32/mo)
-    ONE_PER_AZ = "one_per_az"  # One NAT gateway per AZ (HA, ~$96/mo for 3 AZs)
+    NONE = "none"  
+    SINGLE = "single"  
+    ONE_PER_AZ = "one_per_az"  
 
 
 class EndpointAccess(str, Enum):
     """EKS cluster endpoint access configuration."""
 
-    PRIVATE = "private"  # API server only accessible from within VPC
-    PUBLIC = "public"  # API server accessible from internet
-    PUBLIC_AND_PRIVATE = "public_and_private"  # Both public and private access
+    PRIVATE = "private"  
+    PUBLIC = "public"  
+    PUBLIC_AND_PRIVATE = "public_and_private"  
 
 
 class CapacityType(str, Enum):
@@ -74,11 +57,6 @@ class AmiType(str, Enum):
     AL2023_ARM_64_STANDARD = "AL2023_ARM_64_STANDARD"
     BOTTLEROCKET_X86_64 = "BOTTLEROCKET_x86_64"
     BOTTLEROCKET_ARM_64 = "BOTTLEROCKET_ARM_64"
-
-
-# =============================================================================
-# AWS Configuration
-# =============================================================================
 
 
 class AwsConfigInput(BaseModel):
@@ -109,10 +87,6 @@ class AwsConfigResolved(BaseModel):
     availability_zones: list[str]  # Always 3 AZs, computed from region
 
 
-# =============================================================================
-# Subnet Configuration
-# =============================================================================
-
 
 class SubnetInput(BaseModel):
     """Input for a single subnet - user can specify custom subnets."""
@@ -137,13 +111,8 @@ class SubnetResolved(BaseModel):
 
     cidr_block: str
     availability_zone: str
-    name: str  # Always has a name in resolved config
+    name: str  
     tags: dict[str, str]
-
-
-# =============================================================================
-# VPC Endpoints Configuration
-# =============================================================================
 
 
 class VpcEndpointsInput(BaseModel):
@@ -181,11 +150,6 @@ class VpcEndpointsResolved(BaseModel):
     ec2messages: bool
     elasticloadbalancing: bool
     autoscaling: bool
-
-
-# =============================================================================
-# VPC Configuration
-# =============================================================================
 
 
 class VpcConfigInput(BaseModel):
@@ -261,10 +225,6 @@ class VpcConfigResolved(BaseModel):
     tags: dict[str, str]
 
 
-# =============================================================================
-# EKS Access Configuration
-# =============================================================================
-
 
 class AccessEntryInput(BaseModel):
     """EKS access entry for IAM principal."""
@@ -279,6 +239,71 @@ class AccessEntryInput(BaseModel):
         default_factory=list,
         description="Policy associations for this principal",
     )
+
+class SsmAccessNodeConfig(BaseModel):
+    """SSM access node configuration for private cluster access."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable SSM access node for private cluster access",
+    )
+    instance_type: str = Field(
+        default="t3.micro",
+        description="EC2 instance type for access node",
+    )
+
+
+class SsmNodeStatus(BaseModel):
+    """SSM access node status."""
+
+    enabled: bool
+    instance_id: Optional[str] = None
+    instance_state: Optional[str] = None
+    availability_zone: Optional[str] = None
+    private_ip: Optional[str] = None
+
+
+class SsmSessionInfo(BaseModel):
+    """SSM session connection information."""
+
+    instance_id: str
+    region: str
+    
+    start_session_command: str = Field(
+        description="Command to start SSM session to access node"
+    )
+    configure_kubectl_command: str = Field(
+        description="Command to run inside session to configure kubectl"
+    )
+    
+    instructions: list[str] = Field(default_factory=list)
+
+
+class SsmStatusResponse(BaseModel):
+    """Response for SSM status endpoint."""
+
+    customer_id: str
+    environment: str
+    cluster_name: str
+    access_node: SsmNodeStatus
+    vpc_endpoints: dict[str, bool] = Field(
+        description="Required VPC endpoints status"
+    )
+    ready: bool = Field(
+        description="Whether SSM access is fully configured and ready"
+    )
+    issues: list[str] = Field(
+        default_factory=list,
+        description="Any issues preventing SSM access"
+    )
+
+
+class SsmSessionResponse(BaseModel):
+    """Response for SSM session endpoint."""
+
+    customer_id: str
+    environment: str
+    session: SsmSessionInfo
 
 
 class EksAccessInput(BaseModel):
@@ -308,6 +333,12 @@ class EksAccessInput(BaseModel):
         default_factory=list,
         description="Additional access entries",
     )
+    # NEW: SSM access node configuration
+    ssm_access_node: Optional[SsmAccessNodeConfig] = Field(
+        default=None,
+        description="SSM access node for private cluster access",
+    )
+
 
 
 class EksAccessResolved(BaseModel):
@@ -319,11 +350,7 @@ class EksAccessResolved(BaseModel):
     authentication_mode: str
     bootstrap_cluster_creator_admin_permissions: bool
     access_entries: list[AccessEntryInput]
-
-
-# =============================================================================
-# EKS Addon Configuration
-# =============================================================================
+    ssm_access_node: Optional[SsmAccessNodeConfig] = None  # NEW
 
 
 class AddonConfigInput(BaseModel):
@@ -369,10 +396,6 @@ class EksAddonsResolved(BaseModel):
     snapshot_controller: AddonConfigInput
 
 
-# =============================================================================
-# Node Group Configuration
-# =============================================================================
-
 
 class NodeGroupScalingInput(BaseModel):
     """Node group scaling configuration."""
@@ -411,10 +434,6 @@ class NodeGroupResolved(BaseModel):
     taints: list[dict[str, str]]
     tags: dict[str, str]
 
-
-# =============================================================================
-# EKS Configuration
-# =============================================================================
 
 
 class EksConfigInput(BaseModel):
@@ -494,11 +513,6 @@ class EksConfigResolved(BaseModel):
     node_groups: list[NodeGroupResolved]
 
     tags: dict[str, str]
-
-
-# =============================================================================
-# Main Configuration Models
-# =============================================================================
 
 
 class CustomerConfigInput(BaseModel):
@@ -587,10 +601,6 @@ class CustomerConfigListResponse(BaseModel):
     total: int
 
 
-# =============================================================================
-# Deployment Models
-# =============================================================================
-
 
 class DeployRequest(BaseModel):
     """Request model for triggering a deployment."""
@@ -646,10 +656,6 @@ class CustomerDeployment(BaseModel):
         from_attributes = True
 
 
-# =============================================================================
-# Validation Error Models
-# =============================================================================
-
 
 class ValidationErrorDetail(BaseModel):
     """Single validation error detail."""
@@ -665,3 +671,4 @@ class ValidationErrorResponse(BaseModel):
     error: str = "validation_error"
     message: str
     details: list[ValidationErrorDetail]
+

@@ -1,17 +1,3 @@
-"""Configuration resolver - transforms partial input configs into fully-resolved configs.
-
-This module implements the "sensible defaults" philosophy:
-- Simplest secure thing that AWS already does by default
-- Prefer AWS managed defaults over custom logic
-- Minimal viable configuration that works out of the box
-
-Design Principles:
-1. Every optional field gets a computed or default value
-2. Subnets are auto-calculated if not provided
-3. Mandatory components (IGW, NAT, route tables) are always created
-4. Platform defaults (security groups, IAM roles, addons) are always present
-"""
-
 import ipaddress
 from datetime import datetime, timezone
 from typing import Optional
@@ -35,6 +21,7 @@ from api.models import (
     NodeGroupInput,
     NodeGroupResolved,
     NodeGroupScalingInput,
+    SsmAccessNodeConfig,
     SubnetInput,
     SubnetResolved,
     VpcConfigInput,
@@ -43,16 +30,8 @@ from api.models import (
     VpcEndpointsResolved,
 )
 
-# =============================================================================
-# AWS Region / AZ Resolution
-# =============================================================================
-
-
 def get_default_availability_zones(region: str, count: int = 3) -> list[str]:
-    """Get default availability zones for a region.
-
-    AWS regions typically have 3+ AZs. We default to using a, b, c suffixes.
-    """
+    """Get default availability zones for a region."""
     suffixes = ["a", "b", "c", "d", "e", "f"][:count]
     return [f"{region}{suffix}" for suffix in suffixes]
 
@@ -66,12 +45,6 @@ def resolve_aws_config(input_config: AwsConfigInput) -> AwsConfigResolved:
         availability_zones=get_default_availability_zones(input_config.region, 3),
     )
 
-
-# =============================================================================
-# Subnet CIDR Calculation
-# =============================================================================
-
-
 def calculate_subnet_cidrs(
     vpc_cidr: str,
     availability_zones: list[str],
@@ -81,19 +54,13 @@ def calculate_subnet_cidrs(
     """Calculate subnet CIDRs automatically from VPC CIDR.
 
     Returns list of (cidr_block, availability_zone) tuples.
-
-    Args:
-        vpc_cidr: The VPC CIDR block (e.g., "10.0.0.0/16")
-        availability_zones: List of AZs to create subnets in
-        cidr_mask: The subnet mask (e.g., 24 for /24 subnets)
-        offset_blocks: Number of blocks to skip (for non-overlapping subnets)
-    """
+ """
     vpc_network = ipaddress.ip_network(vpc_cidr, strict=False)
     subnets = []
 
     for i, az in enumerate(availability_zones):
         block_index = offset_blocks + i
-        # Calculate the subnet address by offsetting from VPC start
+   
         subnet_size = 2 ** (32 - cidr_mask)
         subnet_offset = block_index * subnet_size
         subnet_addr = ipaddress.ip_address(int(vpc_network.network_address) + subnet_offset)
@@ -113,20 +80,8 @@ def resolve_subnets(
     customer_id: str,
     base_tags: dict[str, str],
 ) -> list[SubnetResolved]:
-    """Resolve subnet configuration - use custom if provided, otherwise auto-calculate.
-
-    Args:
-        custom_subnets: User-provided subnet configs (or None)
-        vpc_cidr: VPC CIDR for auto-calculation
-        availability_zones: AZs to create subnets in
-        subnet_type: "public", "private", or "pod"
-        cidr_mask: Default CIDR mask for auto-calculation
-        offset_blocks: Block offset for non-overlapping CIDRs
-        customer_id: Customer ID for naming
-        base_tags: Base tags to apply
-    """
+    """Resolve subnet configuration - use custom if provided, otherwise auto-calculate. """
     if custom_subnets:
-        # Use user-provided subnets
         return [
             SubnetResolved(
                 cidr_block=s.cidr_block,
@@ -137,10 +92,8 @@ def resolve_subnets(
             for s in custom_subnets
         ]
 
-    # Auto-calculate subnets
     calculated = calculate_subnet_cidrs(vpc_cidr, availability_zones, cidr_mask, offset_blocks)
 
-    # Add appropriate Kubernetes tags based on subnet type
     k8s_tags: dict[str, str] = {}
     if subnet_type == "public":
         k8s_tags["kubernetes.io/role/elb"] = "1"
@@ -162,24 +115,23 @@ def resolve_subnets(
     ]
 
 
-# =============================================================================
-# VPC Endpoints Resolution
-# =============================================================================
-
-
 def resolve_vpc_endpoints(
     input_endpoints: Optional[VpcEndpointsInput],
     eks_mode: EksMode,
     nat_strategy: NatGatewayStrategy,
+    ssm_access_node_enabled: bool = False,
 ) -> VpcEndpointsResolved:
     """Resolve VPC endpoints configuration.
-
-    Default philosophy:
-    - S3 gateway endpoint: always enabled (free, improves performance)
-    - Interface endpoints: disabled by default (cost ~$7.50/mo each)
-    - For private-only clusters without NAT, enable essential endpoints
+    
+    If SSM access node is enabled and no custom endpoints config provided,
+    automatically enables required SSM endpoints.
     """
     if input_endpoints:
+        # If SSM access node is enabled, ensure SSM endpoints are enabled
+        ssm_enabled = input_endpoints.ssm or ssm_access_node_enabled
+        ssmmessages_enabled = input_endpoints.ssmmessages or ssm_access_node_enabled
+        ec2messages_enabled = input_endpoints.ec2messages or ssm_access_node_enabled
+
         return VpcEndpointsResolved(
             s3=input_endpoints.s3,
             dynamodb=input_endpoints.dynamodb,
@@ -188,35 +140,27 @@ def resolve_vpc_endpoints(
             sts=input_endpoints.sts,
             logs=input_endpoints.logs,
             ec2=input_endpoints.ec2,
-            ssm=input_endpoints.ssm,
-            ssmmessages=input_endpoints.ssmmessages,
-            ec2messages=input_endpoints.ec2messages,
+            ssm=ssm_enabled,
+            ssmmessages=ssmmessages_enabled,
+            ec2messages=ec2messages_enabled,
             elasticloadbalancing=input_endpoints.elasticloadbalancing,
             autoscaling=input_endpoints.autoscaling,
         )
 
-    # Default: only S3 gateway endpoint (free)
-    # If no NAT and private cluster, we'd need more endpoints for EKS to work
-    # But that's an advanced config - user should explicitly enable them
     return VpcEndpointsResolved(
-        s3=True,  # Free, always beneficial
+        s3=True,
         dynamodb=False,
         ecr_api=False,
         ecr_dkr=False,
         sts=False,
         logs=False,
         ec2=False,
-        ssm=False,
-        ssmmessages=False,
-        ec2messages=False,
+        ssm=ssm_access_node_enabled,
+        ssmmessages=ssm_access_node_enabled,
+        ec2messages=ssm_access_node_enabled,
         elasticloadbalancing=False,
         autoscaling=False,
     )
-
-
-# =============================================================================
-# VPC Resolution
-# =============================================================================
 
 
 def resolve_vpc_config(
@@ -225,15 +169,13 @@ def resolve_vpc_config(
     customer_id: str,
     eks_mode: EksMode,
     global_tags: dict[str, str],
+    ssm_access_node_enabled: bool = False,
 ) -> VpcConfigResolved:
     """Resolve VPC configuration with all defaults filled.
-
-    Default subnet layout for /16 VPC:
-    - Public subnets: /24 (256 IPs each) - for load balancers, NAT gateways
-    - Private subnets: /20 (4096 IPs each) - for EC2 instances, pods
-    - Pod subnets: /18 from secondary CIDR (if provided) - for high pod density
+    
+    If ssm_access_node_enabled is True, automatically enables required
+    VPC endpoints for SSM (ssm, ssmmessages, ec2messages).
     """
-    # Use defaults if no input provided
     vpc_input = input_config or VpcConfigInput()
 
     vpc_cidr = vpc_input.cidr_block
@@ -256,12 +198,7 @@ def resolve_vpc_config(
         base_tags=global_tags,
     )
 
-    # Private subnets: use custom if provided, otherwise auto-calculate
-    # For a /16 VPC, put private subnets in the 10.0.16.0+ range
-    # Public at 10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24
-    # Private at 10.0.16.0/20, 10.0.32.0/20, 10.0.48.0/20
     if vpc_input.private_subnets:
-        # Use custom subnets as provided
         private_subnets = [
             SubnetResolved(
                 cidr_block=s.cidr_block,
@@ -277,13 +214,12 @@ def resolve_vpc_config(
             for s in vpc_input.private_subnets
         ]
     else:
-        # Auto-calculate private subnets with proper offset
         vpc_network = ipaddress.ip_network(vpc_cidr, strict=False)
-        private_base = int(vpc_network.network_address) + (16 * 256)  # Skip first 16 /24 blocks
+        private_base = int(vpc_network.network_address) + (16 * 256)
 
         private_subnets = []
         for i, az in enumerate(availability_zones):
-            subnet_size = 2 ** (32 - 20)  # /20 = 4096 IPs
+            subnet_size = 2 ** (32 - 20)
             subnet_addr = ipaddress.ip_address(private_base + (i * subnet_size))
             subnet_cidr = f"{subnet_addr}/20"
 
@@ -337,11 +273,11 @@ def resolve_vpc_config(
             for cidr, az in pod_calculated
         ]
 
-    # Resolve VPC endpoints
     vpc_endpoints = resolve_vpc_endpoints(
         vpc_input.vpc_endpoints,
         eks_mode,
         nat_strategy,
+        ssm_access_node_enabled=ssm_access_node_enabled,
     )
 
     return VpcConfigResolved(
@@ -358,14 +294,9 @@ def resolve_vpc_config(
     )
 
 
-# =============================================================================
-# EKS Access Resolution
-# =============================================================================
-
 
 def resolve_eks_access(input_access: Optional[EksAccessInput]) -> EksAccessResolved:
     """Resolve EKS access configuration.
-
     Default: private endpoint only (most secure).
     """
     if input_access:
@@ -376,9 +307,9 @@ def resolve_eks_access(input_access: Optional[EksAccessInput]) -> EksAccessResol
             authentication_mode=input_access.authentication_mode,
             bootstrap_cluster_creator_admin_permissions=input_access.bootstrap_cluster_creator_admin_permissions,
             access_entries=input_access.access_entries,
+            ssm_access_node=input_access.ssm_access_node,
         )
 
-    # Secure default: private only
     return EksAccessResolved(
         endpoint_private_access=True,
         endpoint_public_access=False,
@@ -386,12 +317,9 @@ def resolve_eks_access(input_access: Optional[EksAccessInput]) -> EksAccessResol
         authentication_mode="API_AND_CONFIG_MAP",
         bootstrap_cluster_creator_admin_permissions=True,
         access_entries=[],
+        ssm_access_node=None,
     )
 
-
-# =============================================================================
-# EKS Addons Resolution
-# =============================================================================
 
 
 def get_default_addon_config(enabled: bool = True) -> AddonConfigInput:
@@ -411,17 +339,10 @@ def resolve_eks_addons(
     eks_mode: EksMode,
 ) -> EksAddonsResolved:
     """Resolve EKS addons configuration.
-
     For managed mode: core addons (vpc-cni, coredns, kube-proxy) are required.
     For auto mode: AWS manages addons automatically.
-
-    Platform defaults:
-    - EBS CSI driver: enabled (most common storage need)
-    - EFS CSI driver: disabled (less common, user can enable)
-    - Pod Identity Agent: enabled (modern IAM approach)
     """
     if input_addons:
-        # Merge user input with defaults
         vpc_cni = input_addons.vpc_cni or get_default_addon_config(True)
         coredns = input_addons.coredns or get_default_addon_config(True)
         kube_proxy = input_addons.kube_proxy or get_default_addon_config(True)
@@ -430,7 +351,6 @@ def resolve_eks_addons(
         pod_identity = input_addons.pod_identity_agent or get_default_addon_config(True)
         snapshot = input_addons.snapshot_controller or get_default_addon_config(False)
     else:
-        # All defaults
         vpc_cni = get_default_addon_config(True)
         coredns = get_default_addon_config(True)
         kube_proxy = get_default_addon_config(True)
@@ -439,11 +359,10 @@ def resolve_eks_addons(
         pod_identity = get_default_addon_config(True)
         snapshot = get_default_addon_config(False)
 
-    # For auto mode, core addons are managed by AWS
     if eks_mode == EksMode.AUTO:
-        vpc_cni.enabled = False  # AWS manages
-        coredns.enabled = False  # AWS manages
-        kube_proxy.enabled = False  # AWS manages
+        vpc_cni.enabled = False  
+        coredns.enabled = False  
+        kube_proxy.enabled = False
 
     return EksAddonsResolved(
         vpc_cni=vpc_cni,
@@ -454,12 +373,6 @@ def resolve_eks_addons(
         pod_identity_agent=pod_identity,
         snapshot_controller=snapshot,
     )
-
-
-# =============================================================================
-# Node Group Resolution
-# =============================================================================
-
 
 def resolve_node_group(
     input_ng: NodeGroupInput,
@@ -490,19 +403,13 @@ def resolve_node_groups(
     customer_id: str,
     global_tags: dict[str, str],
 ) -> list[NodeGroupResolved]:
-    """Resolve node groups configuration.
-
-    For auto mode: no node groups (AWS manages compute).
-    For managed mode: at least one default node group.
-    """
+    """Resolve node groups configuration."""
     if eks_mode == EksMode.AUTO:
-        # Auto mode - AWS manages compute, no node groups needed
         return []
 
     if input_groups:
         return [resolve_node_group(ng, customer_id, global_tags) for ng in input_groups]
 
-    # Default node group for managed mode
     return [
         NodeGroupResolved(
             name="general",
@@ -520,24 +427,12 @@ def resolve_node_groups(
     ]
 
 
-# =============================================================================
-# EKS Resolution
-# =============================================================================
-
-
 def resolve_eks_config(
     input_config: Optional[EksConfigInput],
     customer_id: str,
     global_tags: dict[str, str],
 ) -> EksConfigResolved:
-    """Resolve EKS configuration with all defaults filled.
-
-    Default philosophy:
-    - Auto mode: simplest, AWS manages everything
-    - Encryption: enabled with AWS-managed key (secure default)
-    - Logging: disabled (cost consideration, user can enable)
-    - Zonal shift: disabled (advanced feature)
-    """
+    """Resolve EKS configuration with all defaults filled."""
     eks_input = input_config or EksConfigInput()
 
     mode = eks_input.mode
@@ -561,45 +456,36 @@ def resolve_eks_config(
         tags={**global_tags, **eks_input.tags},
     )
 
-
-# =============================================================================
-# Main Resolver
-# =============================================================================
-
-
 def resolve_customer_config(input_config: CustomerConfigInput) -> CustomerConfigResolved:
-    """Transform partial input config into fully-resolved config.
+    """Transform partial input config into fully-resolved config."""
 
-    This is the main entry point for config resolution. It:
-    1. Fills all missing fields with sensible defaults
-    2. Computes derived values (AZs, subnet CIDRs)
-    3. Ensures all mandatory components are present
-    4. Returns a complete, deployable configuration
-    """
-    # Build global tags
     global_tags = {
         "Environment": input_config.environment,
         "Customer": input_config.customer_id,
         "ManagedBy": "pulumi",
         **input_config.tags,
     }
-
-    # Resolve AWS config (includes AZ computation)
     aws_config = resolve_aws_config(input_config.aws_config)
 
-    # Determine EKS mode early (affects VPC endpoint defaults)
     eks_mode = input_config.eks_config.mode if input_config.eks_config else EksMode.AUTO
 
-    # Resolve VPC config
+    # Check if SSM access node is enabled
+    ssm_access_node_enabled = (
+        input_config.eks_config
+        and input_config.eks_config.access
+        and input_config.eks_config.access.ssm_access_node
+        and input_config.eks_config.access.ssm_access_node.enabled
+    ) or False
+
     vpc_config = resolve_vpc_config(
         input_config.vpc_config,
         aws_config.availability_zones,
         input_config.customer_id,
         eks_mode,
         global_tags,
+        ssm_access_node_enabled=ssm_access_node_enabled,
     )
 
-    # Resolve EKS config
     eks_config = resolve_eks_config(
         input_config.eks_config,
         input_config.customer_id,
@@ -625,14 +511,11 @@ def update_resolved_config(
     updates: CustomerConfigInput,
 ) -> CustomerConfigResolved:
     """Apply updates to an existing resolved config.
-
     Re-resolves the entire config to ensure consistency.
     """
-    # For now, we re-resolve from scratch with the new input
-    # This ensures all derived values are recalculated
+    
     resolved = resolve_customer_config(updates)
 
-    # Preserve original creation time
     resolved.created_at = existing.created_at
     resolved.updated_at = datetime.now(timezone.utc)
 

@@ -1,9 +1,3 @@
-"""File-based customer configuration storage.
-
-Stores customer configurations as JSON files in a local directory.
-Designed with an abstract interface for easy migration to S3 or other backends.
-"""
-
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -14,7 +8,6 @@ from api.settings import settings
 
 
 class ConfigStorageBackend(ABC):
-    """Abstract base class for configuration storage backends."""
 
     @abstractmethod
     def save(self, customer_id: str, config: CustomerConfigResolved) -> None:

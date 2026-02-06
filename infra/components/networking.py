@@ -94,6 +94,7 @@ class Networking(pulumi.ComponentResource):
             *[s.id for s in self.public_subnets]
         ).apply(lambda ids: list(ids))
 
+        # 5. Create public route table with IGW route
         self.public_route_table = aws.ec2.RouteTable(
             f"{name}-public-rt",
             vpc_id=self.vpc_id,
@@ -156,7 +157,9 @@ class Networking(pulumi.ComponentResource):
             *[s.id for s in self.private_subnets]
         ).apply(lambda ids: list(ids))
 
+        #
         self._create_private_routing(vpc_config.nat_gateway_strategy, child_opts)
+
       
         self.pod_subnets: list[aws.ec2.Subnet] = []
         self.pod_subnet_ids: pulumi.Output[list[str]] = pulumi.Output.from_input([])

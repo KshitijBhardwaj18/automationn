@@ -40,28 +40,27 @@ class EksCluster(pulumi.ComponentResource):
         self._provider = provider
         self._vpc_cidr = vpc_cidr
 
-        # Create cluster security group with proper rules
+       
         self.cluster_sg = self._create_cluster_security_group(vpc_id, child_opts)
 
-        # Determine which subnets to use based on endpoint access
+        
         access = eks_config.access
         if access.endpoint_private_access and not access.endpoint_public_access:
-            # Private only - use private subnets
+        
             subnet_ids = private_subnet_ids
         else:
-            # Public or both - use all subnets
+
             subnet_ids = pulumi.Output.all(private_subnet_ids, public_subnet_ids).apply(
                 lambda args: list(args[0]) + list(args[1])
             )
 
-        # Build VPC config
         vpc_config_args = self._build_vpc_config(
             subnet_ids=subnet_ids,
             security_group_ids=[self.cluster_sg.id],
             access_config=access,
         )
 
-        # Build cluster arguments
+    
         cluster_args: dict = {
             "role_arn": cluster_role_arn,
             "version": eks_config.version,
@@ -72,22 +71,18 @@ class EksCluster(pulumi.ComponentResource):
             },
         }
 
-        # Add access config
         cluster_args["access_config"] = aws.eks.ClusterAccessConfigArgs(
             authentication_mode=access.authentication_mode,
             bootstrap_cluster_creator_admin_permissions=access.bootstrap_cluster_creator_admin_permissions,
         )
 
-        # Add kubernetes network config (service CIDR)
         k8s_network_config_args: dict = {
             "service_ipv4_cidr": eks_config.service_ipv4_cidr,
         }
 
-        # Add logging if enabled
         if eks_config.logging_enabled and eks_config.logging_types:
             cluster_args["enabled_cluster_log_types"] = eks_config.logging_types
 
-        # Add encryption if enabled
         if eks_config.encryption_enabled:
             kms_key_arn = eks_config.encryption_kms_key_arn
             if kms_key_arn:
@@ -116,13 +111,11 @@ class EksCluster(pulumi.ComponentResource):
                     resources=["secrets"],
                 )
 
-        # Add zonal shift if enabled
         if eks_config.zonal_shift_enabled:
             cluster_args["zonal_shift_config"] = aws.eks.ClusterZonalShiftConfigArgs(
                 enabled=True,
             )
 
-        # Configure based on mode
         if eks_config.mode == EksMode.AUTO:
             cluster_args["bootstrap_self_managed_addons"] = False
             cluster_args["compute_config"] = aws.eks.ClusterComputeConfigArgs(
@@ -145,17 +138,15 @@ class EksCluster(pulumi.ComponentResource):
             **k8s_network_config_args
         )
 
-        # Create the cluster
+
         self.cluster = aws.eks.Cluster(
             f"{name}-eks-cluster",
             **cluster_args,
             opts=child_opts,
         )
 
-        # Create OIDC provider for IRSA
         self.oidc_provider = self._create_oidc_provider(child_opts)
 
-        # Create addons and node groups for managed mode
         if eks_config.mode == EksMode.MANAGED:
             self._create_addons(eks_config, child_opts)
 
@@ -167,7 +158,6 @@ class EksCluster(pulumi.ComponentResource):
                     child_opts=child_opts,
                 )
 
-        # Export cluster properties
         self.cluster_name = self.cluster.name
         self.cluster_endpoint = self.cluster.endpoint
         self.cluster_ca_data = self.cluster.certificate_authority.data
@@ -203,7 +193,6 @@ class EksCluster(pulumi.ComponentResource):
             opts=opts,
         )
 
-        # Allow all traffic from self (cluster-to-cluster communication)
         aws.ec2.SecurityGroupRule(
             f"{self._name}-eks-sg-self-ingress",
             type="ingress",
@@ -216,7 +205,6 @@ class EksCluster(pulumi.ComponentResource):
             opts=opts,
         )
 
-        # Allow HTTPS from VPC CIDR (for kubectl, API access)
         aws.ec2.SecurityGroupRule(
             f"{self._name}-eks-sg-https-ingress",
             type="ingress",
@@ -229,7 +217,6 @@ class EksCluster(pulumi.ComponentResource):
             opts=opts,
         )
 
-        # Allow all outbound traffic
         aws.ec2.SecurityGroupRule(
             f"{self._name}-eks-sg-egress",
             type="egress",
@@ -251,7 +238,6 @@ class EksCluster(pulumi.ComponentResource):
         """Create OIDC provider for IAM Roles for Service Accounts (IRSA)."""
         oidc_issuer = self.cluster.identities[0].oidcs[0].issuer
 
-        # Use pulumi_tls to get the certificate (not aws.tls which doesn't exist)
         tls_cert = oidc_issuer.apply(lambda url: tls.get_certificate(url=url))
         thumbprint = tls_cert.apply(lambda cert: cert.certificates[0].sha1_fingerprint)
 
@@ -282,12 +268,9 @@ class EksCluster(pulumi.ComponentResource):
 
         This creates a role that the addon's service account can assume via OIDC federation.
         """
-        # Build the trust policy for OIDC federation
-        # The OIDC provider ARN and URL are needed for the trust relationship
         oidc_provider_arn = self.oidc_provider.arn
         oidc_issuer_url = self.cluster.identities[0].oidcs[0].issuer
 
-        # Create the assume role policy document as JSON string
         assume_role_policy = pulumi.Output.all(
             oidc_provider_arn, oidc_issuer_url
         ).apply(
@@ -311,7 +294,7 @@ class EksCluster(pulumi.ComponentResource):
             )
         )
 
-        # Create the IAM role
+       
         role = aws.iam.Role(
             f"{self._name}-{addon_name}-role",
             name=f"{self._name}-{addon_name}-role",
@@ -327,7 +310,7 @@ class EksCluster(pulumi.ComponentResource):
             ),
         )
 
-        # Attach managed policies
+    
         for i, policy_arn in enumerate(managed_policy_arns):
             aws.iam.RolePolicyAttachment(
                 f"{self._name}-{addon_name}-policy-{i}",
@@ -349,9 +332,7 @@ class EksCluster(pulumi.ComponentResource):
         """Create EKS addons for managed mode."""
         addons = eks_config.addons
 
-        # VPC CNI addon - needs IRSA for custom networking, prefix delegation, security groups for pods
         if addons.vpc_cni.enabled:
-            # Create IAM role for VPC CNI with OIDC trust policy
             vpc_cni_role = self._create_addon_irsa_role(
                 addon_name="vpc-cni",
                 service_account_name="aws-node",
@@ -376,7 +357,6 @@ class EksCluster(pulumi.ComponentResource):
                 ),
             )
 
-        # kube-proxy addon
         if addons.kube_proxy.enabled:
             self.kube_proxy_addon = aws.eks.Addon(
                 f"{self._name}-kube-proxy",
@@ -392,7 +372,6 @@ class EksCluster(pulumi.ComponentResource):
                 ),
             )
 
-        # CoreDNS addon
         if addons.coredns.enabled:
             depends = [self.cluster]
             if addons.vpc_cni.enabled:
@@ -412,9 +391,7 @@ class EksCluster(pulumi.ComponentResource):
                 ),
             )
 
-        # EBS CSI Driver addon - requires IAM role for IRSA
         if addons.ebs_csi_driver.enabled:
-            # Create IAM role for EBS CSI driver with OIDC trust policy
             ebs_csi_role = self._create_addon_irsa_role(
                 addon_name="ebs-csi",
                 service_account_name="ebs-csi-controller-sa",
@@ -439,9 +416,7 @@ class EksCluster(pulumi.ComponentResource):
                 ),
             )
 
-        # EFS CSI Driver addon - requires IAM role for IRSA
         if addons.efs_csi_driver.enabled:
-            # Create IAM role for EFS CSI driver with OIDC trust policy
             efs_csi_role = self._create_addon_irsa_role(
                 addon_name="efs-csi",
                 service_account_name="efs-csi-controller-sa",
@@ -466,7 +441,6 @@ class EksCluster(pulumi.ComponentResource):
                 ),
             )
 
-        # Pod Identity Agent addon
         if addons.pod_identity_agent.enabled:
             self.pod_identity_addon = aws.eks.Addon(
                 f"{self._name}-pod-identity",
@@ -482,7 +456,6 @@ class EksCluster(pulumi.ComponentResource):
                 ),
             )
 
-        # Snapshot Controller addon
         if addons.snapshot_controller.enabled:
             self.snapshot_addon = aws.eks.Addon(
                 f"{self._name}-snapshot-controller",
@@ -542,7 +515,6 @@ class EksCluster(pulumi.ComponentResource):
             opts=pulumi.ResourceOptions(parent=self, provider=self._provider),
         )
 
-        # Convert taints to proper format
         node_taints = None
         if node_group_config.taints:
             node_taints = [
@@ -554,7 +526,6 @@ class EksCluster(pulumi.ComponentResource):
                 for t in node_group_config.taints
             ]
 
-        # Determine dependencies
         depends = [self.cluster]
         if hasattr(self, "vpc_cni_addon"):
             depends.append(self.vpc_cni_addon)

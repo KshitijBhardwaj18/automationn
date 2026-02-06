@@ -1,10 +1,3 @@
-"""Customer configuration loader for Pulumi programs.
-
-This module loads the fully-resolved customer configuration from Pulumi config.
-The configuration is set by the deployment system (pulumi_deployments.py) which
-reads from the stored resolved config and sets individual config values.
-"""
-
 import json
 from dataclasses import dataclass, field
 from typing import Optional
@@ -21,6 +14,7 @@ from api.models import (
     EksMode,
     NatGatewayStrategy,
     NodeGroupResolved,
+    SsmAccessNodeConfig,
     SubnetResolved,
     VpcConfigResolved,
     VpcEndpointsResolved,
@@ -140,8 +134,22 @@ def _load_vpc_config(config: pulumi.Config) -> VpcConfigResolved:
     )
 
 
+def _load_ssm_access_node(config: pulumi.Config) -> Optional[SsmAccessNodeConfig]:
+    """Load SSM access node configuration."""
+    enabled = _parse_bool(config.get("ssmAccessNodeEnabled"), False)
+    if not enabled:
+        return None
+
+    return SsmAccessNodeConfig(
+        enabled=True,
+        instance_type=config.get("ssmAccessNodeInstanceType") or "t3.micro",
+    )
+
+
 def _load_eks_access(config: pulumi.Config) -> EksAccessResolved:
     """Load EKS access configuration."""
+    ssm_access_node = _load_ssm_access_node(config)
+
     return EksAccessResolved(
         endpoint_private_access=_parse_bool(config.get("endpointPrivateAccess"), True),
         endpoint_public_access=_parse_bool(config.get("endpointPublicAccess"), False),
@@ -151,6 +159,7 @@ def _load_eks_access(config: pulumi.Config) -> EksAccessResolved:
             config.get("bootstrapClusterCreatorAdmin"), True
         ),
         access_entries=[],  # Access entries handled separately if needed
+        ssm_access_node=ssm_access_node,
     )
 
 
@@ -280,11 +289,7 @@ def _load_eks_config(config: pulumi.Config) -> EksConfigResolved:
 
 
 def load_customer_config() -> PulumiCustomerConfig:
-    """Load customer configuration from Pulumi config.
-
-    This function reads configuration values set by the deployment system
-    and constructs a PulumiCustomerConfig object for use in infrastructure code.
-    """
+    """Load customer configuration from Pulumi config."""
     config = pulumi.Config()
 
     # Basic settings

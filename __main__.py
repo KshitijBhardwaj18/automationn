@@ -1,10 +1,12 @@
 import pulumi
+import pulumi_aws as aws
 
 from infra.components.eks import EksCluster
 from infra.components.iam import EksIamRoles
 from infra.components.networking import Networking
 from infra.config import load_customer_config
 from infra.providers import create_customer_aws_provider
+from infra.components.access_node import AccessNode
 
 config = load_customer_config()
 
@@ -38,6 +40,60 @@ eks = EksCluster(
     tags=config.tags,
     opts=pulumi.ResourceOptions(depends_on=[iam]),
 )
+
+access_node = None
+if (
+    config.eks_config.access.ssm_access_node
+    and config.eks_config.access.ssm_access_node.enabled
+):
+    def get_first_subnet(ids: list[str]) -> str:
+        if not ids:
+            raise ValueError("No private subnets available for access node")
+        return ids[0]
+
+    access_node = AccessNode(
+        name=config.customer_id,
+        vpc_id=networking.vpc_id,
+        subnet_id=networking.private_subnet_ids.apply(get_first_subnet),
+        cluster_security_group_id=eks.cluster_security_group_id,
+        cluster_name=eks.cluster_name,
+        instance_type=config.eks_config.access.ssm_access_node.instance_type,
+        provider=aws_provider,
+        tags=config.tags,
+        opts=pulumi.ResourceOptions(depends_on=[eks]),
+    )
+
+if access_node:
+    # Grant the access node's IAM role Kubernetes cluster-admin permissions
+    # This allows users SSM'd into the access node to run kubectl commands
+    aws.eks.AccessEntry(
+        f"{config.customer_id}-access-node-eks-access",
+        cluster_name=eks.cluster_name,
+        principal_arn=access_node.role.arn,
+        type="STANDARD",
+        opts=pulumi.ResourceOptions(
+            provider=aws_provider,
+            depends_on=[eks, access_node],
+        ),
+    )
+
+    aws.eks.AccessPolicyAssociation(
+        f"{config.customer_id}-access-node-eks-policy",
+        cluster_name=eks.cluster_name,
+        principal_arn=access_node.role.arn,
+        policy_arn="arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+        access_scope=aws.eks.AccessPolicyAssociationAccessScopeArgs(
+            type="cluster",
+        ),
+        opts=pulumi.ResourceOptions(
+            provider=aws_provider,
+            depends_on=[eks, access_node],
+        ),
+    )
+
+    pulumi.export("access_node_instance_id", access_node.instance_id)
+    pulumi.export("access_node_private_ip", access_node.private_ip)
+    pulumi.export("access_node_role_arn", access_node.role.arn)
 
 pulumi.export("vpc_id", networking.vpc_id)
 pulumi.export("private_subnet_ids", networking.private_subnet_ids)
