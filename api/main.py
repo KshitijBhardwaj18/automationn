@@ -4,11 +4,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI  # noqa: E402
 
-from api.routes.configs import router as configs_router
-from api.routes.deployments import router as deployments_router
-from api.routes.cluster import router as cluster_router
+from api.routes.cluster import router as cluster_router  # noqa: E402
+from api.routes.configs import router as configs_router  # noqa: E402
+from api.routes.deployments import router as deployments_router  # noqa: E402
 
 app = FastAPI(
     title="Cortex Prod automation",

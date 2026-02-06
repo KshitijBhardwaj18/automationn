@@ -1,6 +1,7 @@
 import pulumi
 import pulumi_aws as aws
 
+
 class AccessNode(pulumi.ComponentResource):
     """SSM-enabled EC2 instance for private EKS cluster access."""
 
@@ -46,23 +47,25 @@ class AccessNode(pulumi.ComponentResource):
         )
 
         # EKS access policy - allows describing cluster and getting tokens
-        eks_access_policy = aws.iam.RolePolicy(
+        aws.iam.RolePolicy(
             f"{name}-access-node-eks-policy",
             role=self.role.name,
             policy=cluster_name.apply(
-                lambda cn: f"""{{
+                lambda cn: (
+                    """{
                     "Version": "2012-10-17",
                     "Statement": [
-                        {{
+                        {
                             "Effect": "Allow",
                             "Action": [
                                 "eks:DescribeCluster",
                                 "eks:ListClusters"
                             ],
                             "Resource": "*"
-                        }}
+                        }
                     ]
-                }}"""
+                }"""
+                )
             ),
             opts=child_opts,
         )
@@ -73,12 +76,10 @@ class AccessNode(pulumi.ComponentResource):
             opts=child_opts,
         )
 
-        
         self.security_group = aws.ec2.SecurityGroup(
             f"{name}-access-node-sg",
             vpc_id=vpc_id,
             description="SSM access node - egress only, no inbound",
-     
             egress=[
                 aws.ec2.SecurityGroupEgressArgs(
                     protocol="-1",
@@ -174,8 +175,10 @@ echo "Access node setup complete"
         self.private_ip = self.instance.private_ip
         self.availability_zone = self.instance.availability_zone
 
-        self.register_outputs({
-            "instance_id": self.instance_id,
-            "private_ip": self.private_ip,
-            "security_group_id": self.security_group.id,
-        })
+        self.register_outputs(
+            {
+                "instance_id": self.instance_id,
+                "private_ip": self.private_ip,
+                "security_group_id": self.security_group.id,
+            }
+        )

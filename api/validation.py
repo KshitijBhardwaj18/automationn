@@ -62,7 +62,6 @@ def is_subnet_of(subnet_cidr: str, vpc_cidr: str) -> bool:
         return False
 
 
-
 def validate_input_config(config: CustomerConfigInput) -> list[ValidationErrorDetail]:
     """Validate input configuration before resolution.
 
@@ -170,7 +169,7 @@ def validate_vpc_cidrs(vpc_config: VpcConfigResolved) -> list[ValidationErrorDet
                 )
             )
     except ValueError:
-        pass  
+        pass
 
     # Check secondary CIDRs don't overlap with primary
     for i, secondary in enumerate(vpc_config.secondary_cidr_blocks):

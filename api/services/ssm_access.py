@@ -1,6 +1,5 @@
 import json
 import os
-from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -11,6 +10,7 @@ from api.models import (
     SsmNodeStatus,
     SsmSessionInfo,
 )
+
 
 class SsmAccessService:
     """Service for managing SSM access to private EKS clusters."""
@@ -35,9 +35,7 @@ class SsmAccessService:
         if not self._deployment:
             self._deployment = db.get_deployment(self.customer_id, self.environment)
             if not self._deployment:
-                raise ValueError(
-                    f"Deployment {self.customer_id}-{self.environment} not found"
-                )
+                raise ValueError(f"Deployment {self.customer_id}-{self.environment} not found")
         return self._deployment
 
     @property
@@ -72,9 +70,7 @@ class SsmAccessService:
                 "Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set."
             ) from e
         except ClientError as e:
-            raise ValueError(
-                f"Failed to assume role {self.config.aws_config.role_arn}: {e}"
-            ) from e
+            raise ValueError(f"Failed to assume role {self.config.aws_config.role_arn}: {e}") from e
 
         creds = assumed["Credentials"]
 
@@ -108,9 +104,7 @@ class SsmAccessService:
                 enabled=True,
                 instance_id=instance_id,
                 instance_state=instance["State"]["Name"],
-                availability_zone=instance.get("Placement", {}).get(
-                    "AvailabilityZone"
-                ),
+                availability_zone=instance.get("Placement", {}).get("AvailabilityZone"),
                 private_ip=instance.get("PrivateIpAddress"),
             )
         except ClientError as e:
@@ -134,13 +128,9 @@ class SsmAccessService:
         }
 
         try:
-            response = ec2.describe_vpc_endpoints(
-                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
-            )
+            response = ec2.describe_vpc_endpoints(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])
 
-            found_services = {
-                ep["ServiceName"] for ep in response.get("VpcEndpoints", [])
-            }
+            found_services = {ep["ServiceName"] for ep in response.get("VpcEndpoints", [])}
 
             return {
                 short_name: full_service in found_services
@@ -154,26 +144,20 @@ class SsmAccessService:
         instance_id = self.outputs.get("access_node_instance_id")
         cluster_name = self.outputs.get("eks_cluster_name")
         region = self.config.aws_config.region
-        role_arn = self.config.aws_config.role_arn
 
         if not instance_id:
             raise ValueError("SSM access node is not enabled for this deployment")
 
-   
         node_status = await self.get_access_node_status()
         if node_status.instance_state != "running":
             raise ValueError(
                 f"Access node is not running. Current state: {node_status.instance_state}"
             )
 
-        start_session_command = (
-            f"aws ssm start-session --target {instance_id} --region {region}"
-        )
+        start_session_command = f"aws ssm start-session --target {instance_id} --region {region}"
 
         configure_kubectl_command = (
-            f"aws eks update-kubeconfig "
-            f"--name {cluster_name} "
-            f"--region {region}"
+            f"aws eks update-kubeconfig --name {cluster_name} --region {region}"
         )
 
         install_kubectl_commands = [
@@ -190,13 +174,13 @@ class SsmAccessService:
             "",
             "2. Configure AWS credentials with access to the customer account",
             "",
-            f"3. Start SSM session:",
+            "3. Start SSM session:",
             f"   {start_session_command}",
             "",
             "4. Inside the session, install kubectl (if not already installed):",
             "   " + " && ".join(install_kubectl_commands),
             "",
-            f"5. Configure kubectl:",
+            "5. Configure kubectl:",
             f"   {configure_kubectl_command}",
             "",
             "6. Verify access:",
