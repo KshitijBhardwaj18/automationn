@@ -40,12 +40,16 @@ class EksCluster(pulumi.ComponentResource):
         self._provider = provider
         self._vpc_cidr = vpc_cidr
 
+       
         self.cluster_sg = self._create_cluster_security_group(vpc_id, child_opts)
 
+        
         access = eks_config.access
         if access.endpoint_private_access and not access.endpoint_public_access:
+        
             subnet_ids = private_subnet_ids
         else:
+
             subnet_ids = pulumi.Output.all(private_subnet_ids, public_subnet_ids).apply(
                 lambda args: list(args[0]) + list(args[1])
             )
@@ -56,6 +60,7 @@ class EksCluster(pulumi.ComponentResource):
             access_config=access,
         )
 
+    
         cluster_args: dict = {
             "role_arn": cluster_role_arn,
             "version": eks_config.version,
@@ -132,6 +137,7 @@ class EksCluster(pulumi.ComponentResource):
         cluster_args["kubernetes_network_config"] = aws.eks.ClusterKubernetesNetworkConfigArgs(
             **k8s_network_config_args
         )
+
 
         self.cluster = aws.eks.Cluster(
             f"{name}-eks-cluster",
@@ -265,7 +271,9 @@ class EksCluster(pulumi.ComponentResource):
         oidc_provider_arn = self.oidc_provider.arn
         oidc_issuer_url = self.cluster.identities[0].oidcs[0].issuer
 
-        assume_role_policy = pulumi.Output.all(oidc_provider_arn, oidc_issuer_url).apply(
+        assume_role_policy = pulumi.Output.all(
+            oidc_provider_arn, oidc_issuer_url
+        ).apply(
             lambda args: json.dumps(
                 {
                     "Version": "2012-10-17",
@@ -286,6 +294,7 @@ class EksCluster(pulumi.ComponentResource):
             )
         )
 
+       
         role = aws.iam.Role(
             f"{self._name}-{addon_name}-role",
             name=f"{self._name}-{addon_name}-role",
@@ -301,6 +310,7 @@ class EksCluster(pulumi.ComponentResource):
             ),
         )
 
+    
         for i, policy_arn in enumerate(managed_policy_arns):
             aws.iam.RolePolicyAttachment(
                 f"{self._name}-{addon_name}-policy-{i}",

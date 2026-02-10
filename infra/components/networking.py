@@ -10,7 +10,7 @@ from api.models import (
 
 
 class Networking(pulumi.ComponentResource):
-    """VPC and networking infrastructure for a customer."""
+    """VPC and networking infrastructure for a customer. """
 
     def __init__(
         self,
@@ -34,6 +34,7 @@ class Networking(pulumi.ComponentResource):
 
         child_opts = pulumi.ResourceOptions(parent=self, provider=provider)
 
+        
         self.vpc = aws.ec2.Vpc(
             f"{name}-vpc",
             cidr_block=vpc_config.cidr_block,
@@ -48,6 +49,7 @@ class Networking(pulumi.ComponentResource):
         )
         self.vpc_id = self.vpc.id
 
+    
         self.secondary_cidr_associations: list[aws.ec2.VpcIpv4CidrBlockAssociation] = []
         for i, secondary_cidr in enumerate(vpc_config.secondary_cidr_blocks):
             association = aws.ec2.VpcIpv4CidrBlockAssociation(
@@ -88,9 +90,9 @@ class Networking(pulumi.ComponentResource):
             )
             self.public_subnets.append(subnet)
 
-        self.public_subnet_ids = pulumi.Output.all(*[s.id for s in self.public_subnets]).apply(
-            lambda ids: list(ids)
-        )
+        self.public_subnet_ids = pulumi.Output.all(
+            *[s.id for s in self.public_subnets]
+        ).apply(lambda ids: list(ids))
 
         # 5. Create public route table with IGW route
         self.public_route_table = aws.ec2.RouteTable(
@@ -151,13 +153,14 @@ class Networking(pulumi.ComponentResource):
             )
             self.private_subnets.append(subnet)
 
-        self.private_subnet_ids = pulumi.Output.all(*[s.id for s in self.private_subnets]).apply(
-            lambda ids: list(ids)
-        )
+        self.private_subnet_ids = pulumi.Output.all(
+            *[s.id for s in self.private_subnets]
+        ).apply(lambda ids: list(ids))
 
         #
         self._create_private_routing(vpc_config.nat_gateway_strategy, child_opts)
 
+      
         self.pod_subnets: list[aws.ec2.Subnet] = []
         self.pod_subnet_ids: pulumi.Output[list[str]] = pulumi.Output.from_input([])
         if vpc_config.pod_subnets:
@@ -193,6 +196,7 @@ class Networking(pulumi.ComponentResource):
             return
 
         if strategy == NatGatewayStrategy.SINGLE:
+            
             eip = aws.ec2.Eip(
                 f"{self._name}-nat-eip",
                 domain="vpc",
@@ -221,6 +225,7 @@ class Networking(pulumi.ComponentResource):
             self.nat_gateways.append(nat)
 
         elif strategy == NatGatewayStrategy.ONE_PER_AZ:
+            
             for i, subnet in enumerate(self.public_subnets):
                 eip = aws.ec2.Eip(
                     f"{self._name}-nat-eip-{i}",
@@ -258,6 +263,7 @@ class Networking(pulumi.ComponentResource):
         self.private_route_tables: list[aws.ec2.RouteTable] = []
 
         if strategy == NatGatewayStrategy.NONE:
+
             rt = aws.ec2.RouteTable(
                 f"{self._name}-private-rt",
                 vpc_id=self.vpc_id,
@@ -269,6 +275,7 @@ class Networking(pulumi.ComponentResource):
             )
             self.private_route_tables.append(rt)
 
+           
             for i, subnet in enumerate(self.private_subnets):
                 aws.ec2.RouteTableAssociation(
                     f"{self._name}-private-rta-{i}",
@@ -282,6 +289,7 @@ class Networking(pulumi.ComponentResource):
                 )
 
         elif strategy == NatGatewayStrategy.SINGLE:
+        
             rt = aws.ec2.RouteTable(
                 f"{self._name}-private-rt",
                 vpc_id=self.vpc_id,
@@ -293,6 +301,7 @@ class Networking(pulumi.ComponentResource):
             )
             self.private_route_tables.append(rt)
 
+   
             aws.ec2.Route(
                 f"{self._name}-private-nat-route",
                 route_table_id=rt.id,
@@ -507,9 +516,9 @@ class Networking(pulumi.ComponentResource):
                     ),
                 )
 
-        self.pod_subnet_ids = pulumi.Output.all(*[s.id for s in self.pod_subnets]).apply(
-            lambda ids: list(ids)
-        )
+        self.pod_subnet_ids = pulumi.Output.all(
+            *[s.id for s in self.pod_subnets]
+        ).apply(lambda ids: list(ids))
 
     def _create_vpc_endpoints(
         self,
@@ -517,7 +526,7 @@ class Networking(pulumi.ComponentResource):
         opts: pulumi.ResourceOptions,
     ) -> None:
         """Create VPC endpoints based on configuration."""
-
+        
         has_interface_endpoints = any(
             [
                 endpoints_config.ecr_api,

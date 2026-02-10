@@ -6,10 +6,7 @@ import pulumi
 
 from api.models import (
     AddonConfigInput,
-    AddonsConfigResolved,
     AmiType,
-    ArgoCDConfigResolved,
-    ArgoCDRepoConfig,
     CapacityType,
     EksAccessResolved,
     EksAddonsResolved,
@@ -43,9 +40,6 @@ class PulumiCustomerConfig:
     # EKS Configuration (resolved)
     eks_config: EksConfigResolved
 
-    # Cluster Addons (ArgoCD, etc.)
-    addons: AddonsConfigResolved
-
     # Global tags
     tags: dict[str, str] = field(default_factory=dict)
 
@@ -64,32 +58,14 @@ def _parse_bool(value: Optional[str], default: bool = False) -> bool:
     return value.lower() in ("true", "1", "yes")
 
 
-def _parse_json_dict(value: Optional[str], default: dict[str, str] | None = None) -> dict[str, str]:
-    """Parse a JSON string as a dict."""
+def _parse_json(value: Optional[str], default: dict | list | None = None) -> dict | list | None:
+    """Parse a JSON string."""
     if value is None:
-        return default or {}
+        return default
     try:
-        result = json.loads(value)
-        if isinstance(result, dict):
-            return result
-        return default or {}
+        return json.loads(value)
     except json.JSONDecodeError:
-        return default or {}
-
-
-def _parse_json_list(
-    value: Optional[str], default: list[dict[str, str]] | None = None
-) -> list[dict[str, str]]:
-    """Parse a JSON string as a list."""
-    if value is None:
-        return default or []
-    try:
-        result = json.loads(value)
-        if isinstance(result, list):
-            return result
-        return default or []
-    except json.JSONDecodeError:
-        return default or []
+        return default
 
 
 def _load_subnets(config: pulumi.Config, prefix: str) -> list[SubnetResolved]:
@@ -154,7 +130,7 @@ def _load_vpc_config(config: pulumi.Config) -> VpcConfigResolved:
         vpc_endpoints=vpc_endpoints,
         enable_dns_hostnames=_parse_bool(config.get("enableDnsHostnames"), True),
         enable_dns_support=_parse_bool(config.get("enableDnsSupport"), True),
-        tags=_parse_json_dict(config.get("vpcTags"), {}),
+        tags=dict(_parse_json(config.get("vpcTags"), {}) or {}),
     )
 
 
@@ -269,8 +245,8 @@ def _load_node_groups(config: pulumi.Config, eks_mode: EksMode) -> list[NodeGrou
             desired_size=int(config.get("nodeDesiredSize") or "2"),
             min_size=int(config.get("nodeMinSize") or "1"),
             max_size=int(config.get("nodeMaxSize") or "5"),
-            labels=_parse_json_dict(config.get("nodeLabels"), {}),
-            taints=_parse_json_list(config.get("nodeTaints"), []),
+            labels=dict(_parse_json(config.get("nodeLabels"), {}) or {}),
+            taints=list(_parse_json(config.get("nodeTaints"), []) or []),
             tags={},
         )
     ]
@@ -308,36 +284,8 @@ def _load_eks_config(config: pulumi.Config) -> EksConfigResolved:
         deletion_protection=_parse_bool(config.get("deletionProtection"), False),
         addons=addons,
         node_groups=node_groups,
-        tags=_parse_json_dict(config.get("eksTags"), {}),
+        tags=dict(_parse_json(config.get("eksTags"), {}) or {}),
     )
-
-
-def _load_addons_config(config: pulumi.Config) -> AddonsConfigResolved:
-    """Load cluster addons configuration from Pulumi config."""
-    argocd_enabled = _parse_bool(config.get("argoCDEnabled"), False)
-
-    # Load ArgoCD repository config if provided
-    argocd_repo: Optional[ArgoCDRepoConfig] = None
-    repo_url = config.get("argoCDRepoUrl")
-    if repo_url:
-        # Note: password is stored as regular config, not secret, for simplicity
-        # The actual secret handling happens in Pulumi deployments
-        argocd_repo = ArgoCDRepoConfig(
-            url=repo_url,
-            username=config.get("argoCDRepoUsername") or "git",
-            password=config.get("argoCDRepoPassword") or "",
-        )
-
-    argocd = ArgoCDConfigResolved(
-        enabled=argocd_enabled,
-        server_replicas=int(config.get("argoCDServerReplicas") or "2"),
-        repo_server_replicas=int(config.get("argoCDRepoServerReplicas") or "2"),
-        ha_enabled=_parse_bool(config.get("argoCDHAEnabled"), False),
-        repository=argocd_repo,
-        root_app_path=config.get("argoCDRootAppPath") or "apps/",
-    )
-
-    return AddonsConfigResolved(argocd=argocd)
 
 
 def load_customer_config() -> PulumiCustomerConfig:
@@ -358,10 +306,9 @@ def load_customer_config() -> PulumiCustomerConfig:
     else:
         availability_zones = [f"{aws_region}a", f"{aws_region}b", f"{aws_region}c"]
 
-    # Load VPC, EKS, and Addons configs
+    # Load VPC and EKS configs
     vpc_config = _load_vpc_config(config)
     eks_config = _load_eks_config(config)
-    addons_config = _load_addons_config(config)
 
     # Global tags
     tags: dict[str, str] = {
@@ -369,8 +316,8 @@ def load_customer_config() -> PulumiCustomerConfig:
         "Customer": customer_id,
         "ManagedBy": "pulumi",
     }
-    custom_tags = _parse_json_dict(config.get("tags"), {})
-    if custom_tags:
+    custom_tags = _parse_json(config.get("tags"), {})
+    if custom_tags and isinstance(custom_tags, dict):
         tags.update(custom_tags)
 
     return PulumiCustomerConfig(
@@ -382,6 +329,5 @@ def load_customer_config() -> PulumiCustomerConfig:
         availability_zones=availability_zones,
         vpc_config=vpc_config,
         eks_config=eks_config,
-        addons=addons_config,
         tags=tags,
     )

@@ -8,6 +8,7 @@ from api.settings import settings
 
 
 class ConfigStorageBackend(ABC):
+
     @abstractmethod
     def save(self, customer_id: str, config: CustomerConfigResolved) -> None:
         """Save a customer configuration."""

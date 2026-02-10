@@ -1,6 +1,8 @@
 """Deployment management endpoints."""
 
+import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
@@ -15,9 +17,69 @@ from api.models import (
     DestroyRequest,
 )
 from api.pulumi_deployments import PulumiDeploymentsClient
+from api.services.addon_installer import AddonInstallerService
 from api.settings import settings
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/deployments", tags=["deployments"])
+
+
+def _parse_deployment_outputs(outputs_raw: str | None) -> dict | None:
+    """Safely parse deployment outputs JSON. Returns None if missing or invalid."""
+    if not outputs_raw or not outputs_raw.strip():
+        return None
+    try:
+        return json.loads(outputs_raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+# Delay before auto-installing addons so access node user-data (kubectl, helm, kubeconfig) can finish
+AUTO_INSTALL_ADDONS_DELAY_SECONDS = 90
+
+
+async def _auto_install_addons(customer_id: str, environment: str) -> None:
+    """Auto-trigger addon installation after deployment succeeds.
+
+    Runs as a fire-and-forget background task. Errors are logged but do not
+    affect the deployment status -- the user can always re-trigger manually
+    via POST .../addons/argocd/install.
+    """
+    try:
+        config = config_storage.get(customer_id)
+        if not config or not config.addons:
+            return
+
+        argocd = config.addons.argocd
+        if not argocd or not argocd.enabled:
+            return
+
+        logger.info(
+            "Auto-installing ArgoCD for %s-%s", customer_id, environment
+        )
+        installer = AddonInstallerService(customer_id, environment)
+        result = await installer.install_argocd(argocd)
+        logger.info(
+            "ArgoCD install triggered for %s-%s: command_id=%s",
+            customer_id,
+            environment,
+            result.ssm_command_id,
+        )
+    except Exception:
+        logger.exception(
+            "Auto-install addons failed for %s-%s (can be retried manually)",
+            customer_id,
+            environment,
+        )
+
+
+async def _auto_install_addons_after_delay(
+    customer_id: str, environment: str
+) -> None:
+    """Wait for access node user-data to finish, then trigger addon install."""
+    await asyncio.sleep(AUTO_INSTALL_ADDONS_DELAY_SECONDS)
+    await _auto_install_addons(customer_id, environment)
 
 
 def get_pulumi_client() -> PulumiDeploymentsClient:
@@ -193,6 +255,8 @@ async def get_deployment_status(
                     db.update_deployment_status(
                         stack_name=deployment.stack_name,
                         status=DeploymentStatus.DESTROYED,
+                        outputs="",
+                        error_message="",
                     )
                 else:
                     outputs = await client.get_stack_outputs(
@@ -203,6 +267,11 @@ async def get_deployment_status(
                         stack_name=deployment.stack_name,
                         status=DeploymentStatus.SUCCEEDED,
                         outputs=json.dumps(outputs),
+                        error_message="",
+                    )
+                    # Auto-trigger addon installation after first SUCCEEDED (delay so access node user-data can finish)
+                    asyncio.create_task(
+                        _auto_install_addons_after_delay(customer_id, environment)
                     )
                 updated = db.get_deployment(customer_id, environment)
                 if updated:
@@ -231,7 +300,7 @@ async def get_deployment_status(
         role_arn=deployment.role_arn,
         status=deployment.status,
         pulumi_deployment_id=deployment.pulumi_deployment_id,
-        outputs=json.loads(deployment.outputs) if deployment.outputs else None,
+        outputs=_parse_deployment_outputs(deployment.outputs),
         error_message=deployment.error_message,
         created_at=deployment.created_at,
         updated_at=deployment.updated_at,
@@ -257,7 +326,7 @@ async def list_customer_deployments(customer_id: str) -> list[CustomerDeployment
             role_arn=d.role_arn,
             status=d.status,
             pulumi_deployment_id=d.pulumi_deployment_id,
-            outputs=json.loads(d.outputs) if d.outputs else None,
+            outputs=_parse_deployment_outputs(d.outputs),
             error_message=d.error_message,
             created_at=d.created_at,
             updated_at=d.updated_at,

@@ -138,9 +138,9 @@ class Database:
 
             if pulumi_deployment_id:
                 record.pulumi_deployment_id = pulumi_deployment_id
-            if outputs:
+            if outputs is not None:
                 record.outputs = outputs
-            if error_message:
+            if error_message is not None:
                 record.error_message = error_message
 
             session.commit()

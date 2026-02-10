@@ -116,15 +116,18 @@ class PulumiDeploymentsClient:
             escaped_value = value.replace("'", "'\\''")
             return f"pulumi config set --stack {stack_id} {secret_flag}{key} '{escaped_value}'"
 
+        
         commands.append(config_set("customerId", config.customer_id))
         commands.append(config_set("environment", config.environment))
         commands.append(config_set("customerRoleArn", config.aws_config.role_arn))
         commands.append(config_set("externalId", config.aws_config.external_id, secret=True))
         commands.append(config_set("awsRegion", config.aws_config.region))
 
+        
         az_str = ",".join(config.aws_config.availability_zones)
         commands.append(config_set("availabilityZones", az_str))
 
+        
         vpc = config.vpc_config
         commands.append(config_set("vpcCidr", vpc.cidr_block))
         commands.append(config_set("natGatewayStrategy", vpc.nat_gateway_strategy.value))
@@ -132,6 +135,7 @@ class PulumiDeploymentsClient:
         if vpc.secondary_cidr_blocks:
             commands.append(config_set("secondaryCidrBlocks", ",".join(vpc.secondary_cidr_blocks)))
 
+   
         public_subnets_json = json.dumps([s.model_dump() for s in vpc.public_subnets])
         commands.append(config_set("publicSubnets", public_subnets_json))
 
@@ -142,6 +146,7 @@ class PulumiDeploymentsClient:
             pod_subnets_json = json.dumps([s.model_dump() for s in vpc.pod_subnets])
             commands.append(config_set("podSubnets", pod_subnets_json))
 
+        
         endpoints = vpc.vpc_endpoints
         commands.append(config_set("vpcEndpointS3", str(endpoints.s3).lower()))
         commands.append(config_set("vpcEndpointDynamodb", str(endpoints.dynamodb).lower()))
@@ -156,9 +161,11 @@ class PulumiDeploymentsClient:
         commands.append(config_set("vpcEndpointElb", str(endpoints.elasticloadbalancing).lower()))
         commands.append(config_set("vpcEndpointAutoscaling", str(endpoints.autoscaling).lower()))
 
+       
         commands.append(config_set("enableDnsHostnames", str(vpc.enable_dns_hostnames).lower()))
         commands.append(config_set("enableDnsSupport", str(vpc.enable_dns_support).lower()))
 
+       
         eks = config.eks_config
         commands.append(config_set("eksVersion", eks.version))
         commands.append(config_set("eksMode", eks.mode.value))
@@ -236,27 +243,15 @@ class PulumiDeploymentsClient:
             )
             commands.append(config_set("nodeGroups", node_groups_json))
 
-        # Cluster Addons (ArgoCD, etc.)
-        argocd = config.addons.argocd
-        commands.append(config_set("argoCDEnabled", str(argocd.enabled).lower()))
-        if argocd.enabled:
-            commands.append(config_set("argoCDServerReplicas", str(argocd.server_replicas)))
-            commands.append(
-                config_set("argoCDRepoServerReplicas", str(argocd.repo_server_replicas))
-            )
-            commands.append(config_set("argoCDHAEnabled", str(argocd.ha_enabled).lower()))
-            if argocd.root_app_path:
-                commands.append(config_set("argoCDRootAppPath", argocd.root_app_path))
-            if argocd.repository:
-                commands.append(config_set("argoCDRepoUrl", argocd.repository.url))
-                commands.append(config_set("argoCDRepoUsername", argocd.repository.username))
-                commands.append(
-                    config_set("argoCDRepoPassword", argocd.repository.password, secret=True)
-                )
-
         # Global Tags
         if config.tags:
             commands.append(config_set("tags", json.dumps(config.tags)))
+
+
+        if config.addons and config.addons.argocd and config.addons.argocd.enabled:
+            commands.append(config_set("argoCDEnabled", "true"))
+        else:
+            commands.append(config_set("argoCDEnabled", "false"))
 
         return commands
 

@@ -1,5 +1,5 @@
+import asyncio
 import json
-import os
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -42,19 +42,15 @@ class SsmAccessService:
     def outputs(self) -> dict:
         if not self.deployment.outputs:
             return {}
-        return json.loads(self.deployment.outputs)
+        try:
+            return json.loads(self.deployment.outputs)
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     def _get_client(self, service: str):
-        """Get boto3 client with assumed role credentials."""
+        """Get boto3 client with assumed role credentials (uses default credential chain)."""
         if service in self._clients:
             return self._clients[service]
-
-        # Verify AWS credentials are available
-        if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get("AWS_SECRET_ACCESS_KEY"):
-            raise ValueError(
-                "AWS credentials not configured. "
-                "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables."
-            )
 
         try:
             sts = boto3.client("sts", region_name=self.config.aws_config.region)
@@ -67,7 +63,7 @@ class SsmAccessService:
         except NoCredentialsError as e:
             raise ValueError(
                 f"Failed to locate AWS credentials: {e}. "
-                "Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set."
+                "Use env vars, IAM role (EC2/IRSA), or other default provider chain."
             ) from e
         except ClientError as e:
             raise ValueError(f"Failed to assume role {self.config.aws_config.role_arn}: {e}") from e
@@ -84,8 +80,10 @@ class SsmAccessService:
         self._clients[service] = client
         return client
 
-    async def get_access_node_status(self) -> SsmNodeStatus:
-        """Get the status of the SSM access node."""
+    # -- Synchronous implementations (blocking I/O) --
+
+    def _get_access_node_status_sync(self) -> SsmNodeStatus:
+        """Get the status of the SSM access node (blocking)."""
         instance_id = self.outputs.get("access_node_instance_id")
 
         if not instance_id:
@@ -112,8 +110,8 @@ class SsmAccessService:
                 return SsmNodeStatus(enabled=True, instance_id=instance_id)
             raise
 
-    async def check_vpc_endpoints(self) -> dict[str, bool]:
-        """Check if required VPC endpoints for SSM are configured."""
+    def _check_vpc_endpoints_sync(self) -> dict[str, bool]:
+        """Check if required VPC endpoints for SSM are configured (blocking)."""
         vpc_id = self.outputs.get("vpc_id")
         if not vpc_id:
             return {"ssm": False, "ssmmessages": False, "ec2messages": False}
@@ -129,7 +127,6 @@ class SsmAccessService:
 
         try:
             response = ec2.describe_vpc_endpoints(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])
-
             found_services = {ep["ServiceName"] for ep in response.get("VpcEndpoints", [])}
 
             return {
@@ -138,6 +135,36 @@ class SsmAccessService:
             }
         except ClientError:
             return {"ssm": False, "ssmmessages": False, "ec2messages": False}
+
+    def _start_access_node_sync(self) -> dict:
+        """Start a stopped access node (blocking)."""
+        instance_id = self.outputs.get("access_node_instance_id")
+        if not instance_id:
+            raise ValueError("SSM access node is not enabled")
+
+        ec2 = self._get_client("ec2")
+        ec2.start_instances(InstanceIds=[instance_id])
+        return {"status": "starting", "instance_id": instance_id}
+
+    def _stop_access_node_sync(self) -> dict:
+        """Stop the access node (blocking)."""
+        instance_id = self.outputs.get("access_node_instance_id")
+        if not instance_id:
+            raise ValueError("SSM access node is not enabled")
+
+        ec2 = self._get_client("ec2")
+        ec2.stop_instances(InstanceIds=[instance_id])
+        return {"status": "stopping", "instance_id": instance_id}
+
+    # -- Async wrappers (run blocking calls in a thread) --
+
+    async def get_access_node_status(self) -> SsmNodeStatus:
+        """Get the status of the SSM access node."""
+        return await asyncio.to_thread(self._get_access_node_status_sync)
+
+    async def check_vpc_endpoints(self) -> dict[str, bool]:
+        """Check if required VPC endpoints for SSM are configured."""
+        return await asyncio.to_thread(self._check_vpc_endpoints_sync)
 
     async def get_session_info(self) -> SsmSessionInfo:
         """Get SSM session connection information."""
@@ -197,22 +224,8 @@ class SsmAccessService:
 
     async def start_access_node(self) -> dict:
         """Start a stopped access node."""
-        instance_id = self.outputs.get("access_node_instance_id")
-        if not instance_id:
-            raise ValueError("SSM access node is not enabled")
-
-        ec2 = self._get_client("ec2")
-        ec2.start_instances(InstanceIds=[instance_id])
-
-        return {"status": "starting", "instance_id": instance_id}
+        return await asyncio.to_thread(self._start_access_node_sync)
 
     async def stop_access_node(self) -> dict:
-        """Stop the access node"""
-        instance_id = self.outputs.get("access_node_instance_id")
-        if not instance_id:
-            raise ValueError("SSM access node is not enabled")
-
-        ec2 = self._get_client("ec2")
-        ec2.stop_instances(InstanceIds=[instance_id])
-
-        return {"status": "stopping", "instance_id": instance_id}
+        """Stop the access node."""
+        return await asyncio.to_thread(self._stop_access_node_sync)

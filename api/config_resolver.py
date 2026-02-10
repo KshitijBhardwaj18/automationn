@@ -4,14 +4,14 @@ from typing import Optional
 
 from api.models import (
     AddonConfigInput,
-    AddonsConfigInput,
-    AddonsConfigResolved,
     AmiType,
-    ArgoCDConfigInput,
-    ArgoCDConfigResolved,
+    ArgoCDAddonInput,
+    ArgoCDAddonResolved,
     AwsConfigInput,
     AwsConfigResolved,
     CapacityType,
+    ClusterAddonsInput,
+    ClusterAddonsResolved,
     CustomerConfigInput,
     CustomerConfigResolved,
     EksAccessInput,
@@ -25,6 +25,7 @@ from api.models import (
     NodeGroupInput,
     NodeGroupResolved,
     NodeGroupScalingInput,
+    SsmAccessNodeConfig,
     SubnetInput,
     SubnetResolved,
     VpcConfigInput,
@@ -32,7 +33,6 @@ from api.models import (
     VpcEndpointsInput,
     VpcEndpointsResolved,
 )
-
 
 def get_default_availability_zones(region: str, count: int = 3) -> list[str]:
     """Get default availability zones for a region."""
@@ -49,7 +49,6 @@ def resolve_aws_config(input_config: AwsConfigInput) -> AwsConfigResolved:
         availability_zones=get_default_availability_zones(input_config.region, 3),
     )
 
-
 def calculate_subnet_cidrs(
     vpc_cidr: str,
     availability_zones: list[str],
@@ -59,13 +58,13 @@ def calculate_subnet_cidrs(
     """Calculate subnet CIDRs automatically from VPC CIDR.
 
     Returns list of (cidr_block, availability_zone) tuples.
-    """
+ """
     vpc_network = ipaddress.ip_network(vpc_cidr, strict=False)
     subnets = []
 
     for i, az in enumerate(availability_zones):
         block_index = offset_blocks + i
-
+   
         subnet_size = 2 ** (32 - cidr_mask)
         subnet_offset = block_index * subnet_size
         subnet_addr = ipaddress.ip_address(int(vpc_network.network_address) + subnet_offset)
@@ -85,7 +84,7 @@ def resolve_subnets(
     customer_id: str,
     base_tags: dict[str, str],
 ) -> list[SubnetResolved]:
-    """Resolve subnet configuration - use custom if provided, otherwise auto-calculate."""
+    """Resolve subnet configuration - use custom if provided, otherwise auto-calculate. """
     if custom_subnets:
         return [
             SubnetResolved(
@@ -127,7 +126,7 @@ def resolve_vpc_endpoints(
     ssm_access_node_enabled: bool = False,
 ) -> VpcEndpointsResolved:
     """Resolve VPC endpoints configuration.
-
+    
     If SSM access node is enabled and no custom endpoints config provided,
     automatically enables required SSM endpoints.
     """
@@ -177,7 +176,7 @@ def resolve_vpc_config(
     ssm_access_node_enabled: bool = False,
 ) -> VpcConfigResolved:
     """Resolve VPC configuration with all defaults filled.
-
+    
     If ssm_access_node_enabled is True, automatically enables required
     VPC endpoints for SSM (ssm, ssmmessages, ec2messages).
     """
@@ -299,6 +298,7 @@ def resolve_vpc_config(
     )
 
 
+
 def resolve_eks_access(input_access: Optional[EksAccessInput]) -> EksAccessResolved:
     """Resolve EKS access configuration.
     Default: private endpoint only (most secure).
@@ -323,6 +323,7 @@ def resolve_eks_access(input_access: Optional[EksAccessInput]) -> EksAccessResol
         access_entries=[],
         ssm_access_node=None,
     )
+
 
 
 def get_default_addon_config(enabled: bool = True) -> AddonConfigInput:
@@ -363,8 +364,8 @@ def resolve_eks_addons(
         snapshot = get_default_addon_config(False)
 
     if eks_mode == EksMode.AUTO:
-        vpc_cni.enabled = False
-        coredns.enabled = False
+        vpc_cni.enabled = False  
+        coredns.enabled = False  
         kube_proxy.enabled = False
 
     return EksAddonsResolved(
@@ -376,7 +377,6 @@ def resolve_eks_addons(
         pod_identity_agent=pod_identity,
         snapshot_controller=snapshot,
     )
-
 
 def resolve_node_group(
     input_ng: NodeGroupInput,
@@ -460,43 +460,38 @@ def resolve_eks_config(
         tags={**global_tags, **eks_input.tags},
     )
 
-
-def resolve_argocd_config(
-    input_config: Optional[ArgoCDConfigInput],
-) -> ArgoCDConfigResolved:
-    """Resolve ArgoCD configuration with defaults."""
-    if input_config is None:
-        return ArgoCDConfigResolved(
-            enabled=False,
-            server_replicas=2,
-            repo_server_replicas=2,
-            ha_enabled=False,
-            repository=None,
-            root_app_path="apps/",
+def resolve_argocd_addon(
+    input_argocd: Optional[ArgoCDAddonInput],
+) -> ArgoCDAddonResolved:
+    """Resolve ArgoCD addon configuration with defaults."""
+    if input_argocd:
+        return ArgoCDAddonResolved(
+            enabled=input_argocd.enabled,
+            server_replicas=input_argocd.server_replicas,
+            repo_server_replicas=input_argocd.repo_server_replicas,
+            ha_enabled=input_argocd.ha_enabled,
+            repository=input_argocd.repository,
+            root_app_path=input_argocd.root_app_path,
+            chart_version=input_argocd.chart_version,
         )
 
-    return ArgoCDConfigResolved(
-        enabled=input_config.enabled,
-        server_replicas=input_config.server_replicas,
-        repo_server_replicas=input_config.repo_server_replicas,
-        ha_enabled=input_config.ha_enabled,
-        repository=input_config.repository,
-        root_app_path=input_config.root_app_path,
+    return ArgoCDAddonResolved(
+        enabled=False,
+        server_replicas=2,
+        repo_server_replicas=2,
+        ha_enabled=False,
+        repository=None,
+        root_app_path="gitops/apps/",
+        chart_version="7.7.11",
     )
 
 
-def resolve_addons_config(
-    input_config: Optional[AddonsConfigInput],
-) -> AddonsConfigResolved:
-    """Resolve cluster addons configuration with defaults."""
-    if input_config is None:
-        return AddonsConfigResolved(
-            argocd=resolve_argocd_config(None),
-        )
-
-    return AddonsConfigResolved(
-        argocd=resolve_argocd_config(input_config.argocd),
-    )
+def resolve_cluster_addons(
+    input_addons: Optional[ClusterAddonsInput],
+) -> ClusterAddonsResolved:
+    """Resolve cluster-level addons configuration."""
+    argocd_input = input_addons.argocd if input_addons else None
+    return ClusterAddonsResolved(argocd=resolve_argocd_addon(argocd_input))
 
 
 def resolve_customer_config(input_config: CustomerConfigInput) -> CustomerConfigResolved:
@@ -535,7 +530,7 @@ def resolve_customer_config(input_config: CustomerConfigInput) -> CustomerConfig
         global_tags,
     )
 
-    addons_config = resolve_addons_config(input_config.addons)
+    addons = resolve_cluster_addons(input_config.addons)
 
     now = datetime.now(timezone.utc)
 
@@ -545,7 +540,7 @@ def resolve_customer_config(input_config: CustomerConfigInput) -> CustomerConfig
         aws_config=aws_config,
         vpc_config=vpc_config,
         eks_config=eks_config,
-        addons=addons_config,
+        addons=addons,
         tags=global_tags,
         created_at=now,
         updated_at=now,
@@ -559,7 +554,7 @@ def update_resolved_config(
     """Apply updates to an existing resolved config.
     Re-resolves the entire config to ensure consistency.
     """
-
+    
     resolved = resolve_customer_config(updates)
 
     resolved.created_at = existing.created_at

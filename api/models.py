@@ -20,24 +20,24 @@ class DeploymentStatus(str, Enum):
 class EksMode(str, Enum):
     """EKS compute mode."""
 
-    AUTO = "auto"
-    MANAGED = "managed"
+    AUTO = "auto" 
+    MANAGED = "managed"  
 
 
 class NatGatewayStrategy(str, Enum):
     """NAT Gateway deployment strategy."""
 
-    NONE = "none"
-    SINGLE = "single"
-    ONE_PER_AZ = "one_per_az"
+    NONE = "none"  
+    SINGLE = "single"  
+    ONE_PER_AZ = "one_per_az"  
 
 
 class EndpointAccess(str, Enum):
     """EKS cluster endpoint access configuration."""
 
-    PRIVATE = "private"
-    PUBLIC = "public"
-    PUBLIC_AND_PRIVATE = "public_and_private"
+    PRIVATE = "private"  
+    PUBLIC = "public"  
+    PUBLIC_AND_PRIVATE = "public_and_private"  
 
 
 class CapacityType(str, Enum):
@@ -87,6 +87,7 @@ class AwsConfigResolved(BaseModel):
     availability_zones: list[str]  # Always 3 AZs, computed from region
 
 
+
 class SubnetInput(BaseModel):
     """Input for a single subnet - user can specify custom subnets."""
 
@@ -110,7 +111,7 @@ class SubnetResolved(BaseModel):
 
     cidr_block: str
     availability_zone: str
-    name: str
+    name: str  
     tags: dict[str, str]
 
 
@@ -224,6 +225,7 @@ class VpcConfigResolved(BaseModel):
     tags: dict[str, str]
 
 
+
 class AccessEntryInput(BaseModel):
     """EKS access entry for IAM principal."""
 
@@ -237,7 +239,6 @@ class AccessEntryInput(BaseModel):
         default_factory=list,
         description="Policy associations for this principal",
     )
-
 
 class SsmAccessNodeConfig(BaseModel):
     """SSM access node configuration for private cluster access."""
@@ -267,12 +268,14 @@ class SsmSessionInfo(BaseModel):
 
     instance_id: str
     region: str
-
-    start_session_command: str = Field(description="Command to start SSM session to access node")
+    
+    start_session_command: str = Field(
+        description="Command to start SSM session to access node"
+    )
     configure_kubectl_command: str = Field(
         description="Command to run inside session to configure kubectl"
     )
-
+    
     instructions: list[str] = Field(default_factory=list)
 
 
@@ -283,9 +286,16 @@ class SsmStatusResponse(BaseModel):
     environment: str
     cluster_name: str
     access_node: SsmNodeStatus
-    vpc_endpoints: dict[str, bool] = Field(description="Required VPC endpoints status")
-    ready: bool = Field(description="Whether SSM access is fully configured and ready")
-    issues: list[str] = Field(default_factory=list, description="Any issues preventing SSM access")
+    vpc_endpoints: dict[str, bool] = Field(
+        description="Required VPC endpoints status"
+    )
+    ready: bool = Field(
+        description="Whether SSM access is fully configured and ready"
+    )
+    issues: list[str] = Field(
+        default_factory=list,
+        description="Any issues preventing SSM access"
+    )
 
 
 class SsmSessionResponse(BaseModel):
@@ -323,11 +333,12 @@ class EksAccessInput(BaseModel):
         default_factory=list,
         description="Additional access entries",
     )
-    # NEW: SSM access node configuration
+
     ssm_access_node: Optional[SsmAccessNodeConfig] = Field(
         default=None,
         description="SSM access node for private cluster access",
     )
+
 
 
 class EksAccessResolved(BaseModel):
@@ -359,16 +370,13 @@ class AddonConfigInput(BaseModel):
 class EksAddonsInput(BaseModel):
     """EKS addons configuration - platform defaults applied."""
 
-    # Core addons (always enabled for managed mode)
     vpc_cni: Optional[AddonConfigInput] = None
     coredns: Optional[AddonConfigInput] = None
     kube_proxy: Optional[AddonConfigInput] = None
 
-    # Storage addons
     ebs_csi_driver: Optional[AddonConfigInput] = None
     efs_csi_driver: Optional[AddonConfigInput] = None
 
-    # Other addons
     pod_identity_agent: Optional[AddonConfigInput] = None
     snapshot_controller: Optional[AddonConfigInput] = None
 
@@ -383,6 +391,7 @@ class EksAddonsResolved(BaseModel):
     efs_csi_driver: AddonConfigInput
     pod_identity_agent: AddonConfigInput
     snapshot_controller: AddonConfigInput
+
 
 
 class NodeGroupScalingInput(BaseModel):
@@ -423,6 +432,7 @@ class NodeGroupResolved(BaseModel):
     tags: dict[str, str]
 
 
+
 class EksConfigInput(BaseModel):
     """EKS cluster configuration input."""
 
@@ -436,30 +446,26 @@ class EksConfigInput(BaseModel):
         description="Kubernetes service CIDR",
     )
 
-    # Access configuration
     access: Optional[EksAccessInput] = None
 
-    # Logging - disabled by default (cost consideration)
     logging_enabled: bool = Field(default=False)
     logging_types: list[str] = Field(
         default_factory=lambda: ["api", "audit", "authenticator"],
     )
 
-    # Encryption - enabled by default (AWS managed key)
     encryption_enabled: bool = Field(default=True)
     encryption_kms_key_arn: Optional[str] = Field(
         default=None,
         description="KMS key ARN (None = AWS creates one)",
     )
 
-    # Other settings
+    
     zonal_shift_enabled: bool = Field(default=False)
     deletion_protection: bool = Field(default=False)
 
-    # Addons
+    
     addons: Optional[EksAddonsInput] = None
 
-    # Node groups (only for managed mode)
     node_groups: Optional[list[NodeGroupInput]] = None
 
     tags: dict[str, str] = Field(default_factory=dict)
@@ -496,71 +502,76 @@ class EksConfigResolved(BaseModel):
 
     addons: EksAddonsResolved
 
-    # Node groups - empty for auto mode, populated for managed mode
     node_groups: list[NodeGroupResolved]
 
     tags: dict[str, str]
 
 
-# =============================================================================
-# Cluster Addons Configuration (ArgoCD, etc.)
-# =============================================================================
-
 
 class ArgoCDRepoConfig(BaseModel):
-    """Git repository credentials for ArgoCD."""
+    """ArgoCD Git repository credentials."""
 
     url: str = Field(..., description="Git repository URL")
     username: str = Field(default="git", description="Git username")
-    password: str = Field(..., description="Git password or token")
+    password: str = Field(default="", description="Git password or personal access token")
 
 
-class ArgoCDConfigInput(BaseModel):
-    """ArgoCD configuration input."""
+class ArgoCDAddonInput(BaseModel):
+    """ArgoCD addon configuration input."""
 
-    enabled: bool = Field(default=False, description="Enable ArgoCD")
-    server_replicas: int = Field(
-        default=2, ge=1, le=5, description="Number of ArgoCD server replicas"
-    )
-    repo_server_replicas: int = Field(
-        default=2, ge=1, le=5, description="Number of ArgoCD repo server replicas"
-    )
-    ha_enabled: bool = Field(default=False, description="Enable HA mode with Redis HA")
-    repository: Optional[ArgoCDRepoConfig] = Field(
-        default=None, description="Git repository credentials"
-    )
-    root_app_path: Optional[str] = Field(
-        default="apps/",
-        description="Path to Application YAMLs in the repository",
-    )
+    enabled: bool = Field(default=False, description="Enable ArgoCD installation")
+    server_replicas: int = Field(default=2, ge=1, le=10)
+    repo_server_replicas: int = Field(default=2, ge=1, le=10)
+    ha_enabled: bool = Field(default=False, description="Enable HA mode")
+    repository: Optional[ArgoCDRepoConfig] = None
+    root_app_path: str = Field(default="gitops/apps/", description="Path to root app manifests")
+    chart_version: str = Field(default="7.7.11", description="ArgoCD Helm chart version")
 
 
-class ArgoCDConfigResolved(BaseModel):
-    """Fully resolved ArgoCD configuration."""
+class ArgoCDAddonResolved(BaseModel):
+    """Fully resolved ArgoCD addon configuration."""
 
     enabled: bool
     server_replicas: int
     repo_server_replicas: int
     ha_enabled: bool
-    repository: Optional[ArgoCDRepoConfig]
-    root_app_path: Optional[str]
+    repository: Optional[ArgoCDRepoConfig] = None
+    root_app_path: str
+    chart_version: str = Field(default="7.7.11")
 
 
-class AddonsConfigInput(BaseModel):
-    """Cluster addons configuration input."""
+class ClusterAddonsInput(BaseModel):
+    """Cluster-level addons configuration input (installed via SSM)."""
 
-    argocd: Optional[ArgoCDConfigInput] = Field(default=None, description="ArgoCD configuration")
-
-
-class AddonsConfigResolved(BaseModel):
-    """Fully resolved cluster addons configuration."""
-
-    argocd: ArgoCDConfigResolved
+    argocd: Optional[ArgoCDAddonInput] = None
 
 
-# =============================================================================
-# Customer Configuration
-# =============================================================================
+class ClusterAddonsResolved(BaseModel):
+    """Fully resolved cluster-level addons configuration."""
+
+    argocd: ArgoCDAddonResolved
+
+
+class AddonInstallStatus(str, Enum):
+    """Status of an addon installation via SSM."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class AddonInstallResult(BaseModel):
+    """Result of an addon installation via SSM Run Command."""
+
+    addon_name: str
+    status: AddonInstallStatus
+    ssm_command_id: Optional[str] = None
+    instance_id: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    output: Optional[str] = None
+    error: Optional[str] = None
 
 
 class CustomerConfigInput(BaseModel):
@@ -591,10 +602,8 @@ class CustomerConfigInput(BaseModel):
     # EKS configuration - optional, uses defaults
     eks_config: Optional[EksConfigInput] = None
 
-    # Cluster addons - optional
-    addons: Optional[AddonsConfigInput] = Field(
-        default=None, description="Cluster addons configuration (ArgoCD, etc.)"
-    )
+    # Cluster-level addons (ArgoCD, etc.) - installed via SSM after deployment
+    addons: Optional[ClusterAddonsInput] = None
 
     # Global tags applied to all resources
     tags: dict[str, str] = Field(default_factory=dict)
@@ -613,7 +622,9 @@ class CustomerConfigResolved(BaseModel):
     aws_config: AwsConfigResolved
     vpc_config: VpcConfigResolved
     eks_config: EksConfigResolved
-    addons: AddonsConfigResolved
+
+    # Cluster-level addons (ArgoCD, etc.) - optional to not break existing configs
+    addons: Optional[ClusterAddonsResolved] = None
 
     tags: dict[str, str]
 
@@ -629,7 +640,7 @@ class CustomerConfigResponse(BaseModel):
     aws_region: str
     vpc_config: VpcConfigResolved
     eks_config: EksConfigResolved
-    addons: AddonsConfigResolved
+    addons: Optional[ClusterAddonsResolved] = None
     tags: dict[str, str]
     created_at: datetime
     updated_at: datetime
@@ -655,6 +666,7 @@ class CustomerConfigListResponse(BaseModel):
 
     configs: list[CustomerConfigResponse]
     total: int
+
 
 
 class DeployRequest(BaseModel):
@@ -711,6 +723,7 @@ class CustomerDeployment(BaseModel):
         from_attributes = True
 
 
+
 class ValidationErrorDetail(BaseModel):
     """Single validation error detail."""
 
@@ -725,3 +738,4 @@ class ValidationErrorResponse(BaseModel):
     error: str = "validation_error"
     message: str
     details: list[ValidationErrorDetail]
+

@@ -55,11 +55,12 @@ def cidrs_overlap(cidr1: str, cidr2: str) -> bool:
 def is_subnet_of(subnet_cidr: str, vpc_cidr: str) -> bool:
     """Check if subnet CIDR is within VPC CIDR range."""
     try:
-        subnet = ipaddress.ip_network(subnet_cidr, strict=False)
-        vpc = ipaddress.ip_network(vpc_cidr, strict=False)
+        subnet = ipaddress.IPv4Network(subnet_cidr, strict=False)
+        vpc = ipaddress.IPv4Network(vpc_cidr, strict=False)
         return subnet.subnet_of(vpc)
-    except ValueError:
+    except (ValueError, ipaddress.AddressValueError):
         return False
+
 
 
 def validate_input_config(config: CustomerConfigInput) -> list[ValidationErrorDetail]:
@@ -169,7 +170,7 @@ def validate_vpc_cidrs(vpc_config: VpcConfigResolved) -> list[ValidationErrorDet
                 )
             )
     except ValueError:
-        pass
+        pass  
 
     # Check secondary CIDRs don't overlap with primary
     for i, secondary in enumerate(vpc_config.secondary_cidr_blocks):
